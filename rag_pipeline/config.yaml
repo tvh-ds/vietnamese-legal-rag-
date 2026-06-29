@@ -1,0 +1,128 @@
+# =============================================================================
+# Chunking + Retrieval Pipeline Configuration
+# Vietnamese Legal RAG System (VBQPPL)
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Chunking parameters (Section 3 & 4 of Pipeline.md)
+# ---------------------------------------------------------------------------
+chunking:
+  # Maximum tokens per chunk before recursive splitting
+  max_tokens: 512
+  
+  # Minimum tokens per chunk; shorter chunks merged with adjacent ones
+  min_tokens: 30
+  
+  # Token overlap for sliding-window fallback (0 = no overlap)
+  overlap_tokens: 0
+
+# ---------------------------------------------------------------------------
+# Embedding model (Section 7 of Pipeline.md)
+# ---------------------------------------------------------------------------
+embedding:
+  # sentence-transformers model name
+  # Vietnamese-compatible multilingual model (384-dim)
+  model_name: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+  
+  # Batch size for embedding generation
+  batch_size: 32
+  
+  # Device: "cpu", "cuda", or "auto" (auto-detects GPU)
+  device: "cpu"
+
+# ---------------------------------------------------------------------------
+# Vector database (Section 8 of Pipeline.md)
+# ---------------------------------------------------------------------------
+vector_store:
+  # Backend type (only "chromadb" supported currently)
+  type: "chromadb"
+  
+  # Path to persist ChromaDB data
+  path: "./chroma_db"
+  
+  # Collection name within ChromaDB
+  collection_name: "vbqppl_legal_chunks"
+
+# ---------------------------------------------------------------------------
+# Query rewriting (Section 9 of Pipeline.md)
+# ---------------------------------------------------------------------------
+query_rewriter:
+  # Enable query normalization
+  enabled: true
+  
+  # Expand Vietnamese legal abbreviations (dk → điều kiện, vbpl → văn bản pháp luật)
+  expand_abbreviations: true
+  
+  # Append legal-domain context phrase for short queries
+  append_context: true
+  context_phrase: "theo pháp luật hiện hành"
+
+# ---------------------------------------------------------------------------
+# Retrieval parameters (Section 10 of Pipeline.md)
+# ---------------------------------------------------------------------------
+retrieval:
+  # Number of top chunks to return from vector search
+  top_k: 10
+  
+  # Minimum cosine similarity threshold (0.0 - 1.0)
+  similarity_threshold: 0.3
+  
+  # Enable metadata post-filtering (status, effectiveDate, topic)
+  enable_metadata_filtering: true
+  
+  # Enable graph expansion via article references
+  enable_graph_expansion: true
+  
+  # Max articles to pull in via reference expansion
+  expansion_max_articles: 5
+  
+  # Weight factors for hybrid scoring
+  vector_weight: 0.7
+  metadata_boost: 0.2
+  graph_boost: 0.1
+
+# ---------------------------------------------------------------------------
+# Reranker (Section 11 of Pipeline.md)
+# ---------------------------------------------------------------------------
+reranker:
+  # Enable post-retrieval reranking
+  enabled: true
+  
+  # MMR lambda: 1.0 = pure relevance, 0.0 = pure diversity
+  lambda_mmr: 0.7
+  
+  # Weight for keyword overlap bonus
+  keyword_boost: 0.15
+  
+  # Weight for diversity penalty
+  diversity_weight: 0.15
+
+# ---------------------------------------------------------------------------
+# Context generation (Section 5 of Pipeline.md)
+# ---------------------------------------------------------------------------
+context:
+  # Whether to prepend article-level context to each chunk
+  enabled: true
+  
+  # Use LLM for context generation (true) or heuristic fallback (false)
+  use_llm: false
+  
+  # Target context length in tokens (60-120 recommended)
+  max_context_tokens: 100
+
+# ---------------------------------------------------------------------------
+# Data source
+# ---------------------------------------------------------------------------
+data:
+  # Directory containing parsed JSON files (relative to this config file)
+  path: "../data"
+
+# ---------------------------------------------------------------------------
+# Metadata filtering preferences
+# ---------------------------------------------------------------------------
+metadata:
+  # Boost chunks from ACTIVE/valid documents
+  prefer_active: true
+  
+  # Boost chunks matching the query's implied topic
+  topic_boost: true
