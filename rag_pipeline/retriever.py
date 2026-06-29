@@ -14,6 +14,7 @@ from typing import Optional
 
 import numpy as np
 
+from bm25_retriever import BM25Retriever
 from data_loader import Article
 from embedder import Embedder
 from reranker import Reranker
@@ -30,8 +31,9 @@ logger = logging.getLogger(__name__)
 class Retriever:
     """Hybrid retriever for Vietnamese legal chunks.
 
-    Combines dense vector search with metadata-based filtering/boosting
-    and optional graph expansion through article cross-references.
+    Combines dense vector search + BM25 sparse retrieval with
+    metadata-based filtering/boosting and optional graph expansion
+    through article cross-references.
     """
 
     def __init__(
@@ -51,6 +53,8 @@ class Retriever:
         prefer_active: bool = True,
         topic_boost: bool = True,
         reranker: Reranker | None = None,
+        bm25_retriever: BM25Retriever | None = None,
+        bm25_weight: float = 0.3,
     ) -> None:
         self.embedder = embedder
         self.vector_store = vector_store
@@ -65,6 +69,8 @@ class Retriever:
         self.prefer_active = prefer_active
         self.topic_boost = topic_boost
         self.reranker = reranker
+        self.bm25_retriever = bm25_retriever
+        self.bm25_weight = bm25_weight
 
         # Build article lookup by article_id for graph expansion
         self._article_by_id: dict[str, Article] = {
@@ -98,6 +104,12 @@ class Retriever:
         # Convert distance (cosine 0=identical, 2=opposite) to similarity score
         for r in vector_results:
             r["similarity"] = 1.0 - (r.get("distance", 1.0) / 2.0)
+
+        # Stage 1.5 — BM25 sparse retrieval (parallel)
+        if self.bm25_retriever is not None and self.bm25_retriever.is_built():
+            bm25_raw = self.bm25_retriever.search(query)
+            # Fuse BM25 results with vector results
+            vector_results = self._fuse_bm25(vector_results, bm25_raw, k * 2)
 
         # Stage 2 — Metadata filtering / boosting
         scored = self._apply_metadata_boost(vector_results, filter_topic_id)
@@ -247,3 +259,55 @@ class Retriever:
                         break
 
         return merged
+
+    # -- BM25 fusion ---------------------------------------------------------
+
+    def _fuse_bm25(
+        self,
+        vector_results: list[dict],
+        bm25_results: list[dict],
+        pool_size: int,
+    ) -> list[dict]:
+        """Fuse BM25 sparse scores with vector similarity scores.
+
+        Strategy: For chunks that appear in both result sets, blend scores
+        using weighted average. For chunks only in one set, keep that score
+        (slightly penalized). The result list is trimmed to pool_size.
+        """
+        # Build lookup of BM25 scores by chunk_id
+        bm25_by_id: dict[str, float] = {
+            r["chunk_id"]: r["bm25_score"] for r in bm25_results
+        }
+
+        # Blend BM25 scores into vector results
+        for vr in vector_results:
+            cid = vr.get("chunk_id", "")
+            if cid in bm25_by_id:
+                # Weighted blend: vector dominates, BM25 boosts exact matches
+                vec_sim = vr.get("similarity", 0.0)
+                bm25_s = bm25_by_id[cid]
+                vr["similarity"] = (
+                    (1.0 - self.bm25_weight) * vec_sim
+                    + self.bm25_weight * bm25_s
+                )
+
+        # Add BM25-only results that aren't in vector results
+        existing_ids = {r.get("chunk_id", "") for r in vector_results}
+        for br in bm25_results:
+            if br["chunk_id"] not in existing_ids:
+                vector_results.append({
+                    "chunk_id": br["chunk_id"],
+                    "content": br["content"],
+                    "metadata": {
+                        "article_id": br.get("article_id", ""),
+                        "unit_type": br.get("unit_type", "ARTICLE"),
+                        "order": 0,
+                        "hierarchy_path": "",
+                    },
+                    "similarity": br["bm25_score"] * self.bm25_weight,
+                    "distance": 1.0 - br["bm25_score"],
+                })
+
+        # Sort by blended similarity, trim
+        vector_results.sort(key=lambda r: r.get("similarity", 0.0), reverse=True)
+        return vector_results[:pool_size]

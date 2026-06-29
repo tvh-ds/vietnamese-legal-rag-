@@ -44,6 +44,17 @@ class QueryRewriterConfig:
 
 
 @dataclass
+class BM25Config:
+    """BM25 sparse retrieval parameters."""
+
+    enabled: bool = True
+    top_k: int = 20
+    k1: float = 1.5
+    b: float = 0.75
+    index_path: str = "./chroma_db/bm25_index.pkl"
+
+
+@dataclass
 class RetrievalConfig:
     """Retrieval parameters (Section 10 of Pipeline.md)."""
 
@@ -99,6 +110,7 @@ class Config:
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     vector_store: VectorStoreConfig = field(default_factory=VectorStoreConfig)
     query_rewriter: QueryRewriterConfig = field(default_factory=QueryRewriterConfig)
+    bm25: BM25Config = field(default_factory=BM25Config)
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     reranker: RerankerConfig = field(default_factory=RerankerConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
@@ -119,6 +131,7 @@ class Config:
             embedding=EmbeddingConfig(**raw.get("embedding", {})),
             vector_store=VectorStoreConfig(**raw.get("vector_store", {})),
             query_rewriter=QueryRewriterConfig(**raw.get("query_rewriter", {})),
+            bm25=BM25Config(**raw.get("bm25", {})),
             retrieval=RetrievalConfig(**raw.get("retrieval", {})),
             reranker=RerankerConfig(**raw.get("reranker", {})),
             context=ContextConfig(**raw.get("context", {})),

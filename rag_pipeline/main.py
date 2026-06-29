@@ -14,9 +14,10 @@ import sys
 import time
 from pathlib import Path
 
+from bm25_retriever import BM25Retriever
 from config import Config, load_config
 from data_loader import Article, load_articles
-from chunker import Chunk, Chunker, chunk_articles
+from chunker import Chunk, Chunker, chunk_articles, set_tokenizer_model
 from embedder import Embedder
 from query_rewriter import QueryRewriter
 from reranker import Reranker
@@ -47,14 +48,16 @@ def cmd_index(config: Config) -> None:
     print("=" * 60)
 
     # 1. Load data
-    print("\n[1/4] Loading articles…")
+    print("\n[1/5] Loading articles…")
     t0 = time.perf_counter()
     articles = load_articles(config.data.path)
     t1 = time.perf_counter()
     print(f"  Loaded {len(articles)} articles in {t1 - t0:.1f}s")
 
     # 2. Chunk
-    print("\n[2/4] Chunking articles…")
+    print("\n[2/5] Chunking articles…")
+    # Match tokenizer to embedding model for accurate token counts
+    set_tokenizer_model(config.embedding.model_name)
     t0 = time.perf_counter()
     chunker = Chunker(
         max_tokens=config.chunking.max_tokens,
@@ -74,7 +77,7 @@ def cmd_index(config: Config) -> None:
     print(f"  Produced {len(chunks)} chunks in {t1 - t0:.1f}s")
 
     # 3. Embed
-    print("\n[3/4] Generating embeddings…")
+    print("\n[3/5] Generating embeddings…")
     print(f"  Model: {config.embedding.model_name}")
     t0 = time.perf_counter()
     embedder = Embedder(
@@ -88,7 +91,7 @@ def cmd_index(config: Config) -> None:
     print(f"  Embedded {len(chunks)} chunks ({embeddings.shape[1]}-dim) in {t1 - t0:.1f}s")
 
     # 4. Store
-    print("\n[4/4] Storing in vector database…")
+    print("\n[4/5] Storing in vector database…")
     t0 = time.perf_counter()
     store = VectorStore(
         path=config.vector_store.path,
@@ -98,6 +101,23 @@ def cmd_index(config: Config) -> None:
     store.upsert(chunks, embeddings)
     t1 = time.perf_counter()
     print(f"  Stored {store.count()} chunks in {t1 - t0:.1f}s")
+
+    # 5. BM25 index
+    if config.bm25.enabled:
+        print("\n[5/5] Building BM25 index…")
+        t0 = time.perf_counter()
+        bm25 = BM25Retriever(
+            k1=config.bm25.k1,
+            b=config.bm25.b,
+            top_k=config.bm25.top_k,
+        )
+        # Build index from chunks (convert Chunk → RetrievalResult-like)
+        bm25.build_index(chunks)  # type: ignore[arg-type]
+        bm25.save(config.bm25.index_path)
+        t1 = time.perf_counter()
+        print(f"  BM25 index built in {t1 - t0:.1f}s")
+    else:
+        print("\n[5/5] BM25 index skipped (disabled in config)")
 
     print("\n[OK] Indexing complete.")
 
@@ -154,6 +174,14 @@ def cmd_search(
             diversity_weight=config.reranker.diversity_weight,
         )
 
+    # BM25 retriever (if available)
+    bm25 = None
+    if config.bm25.enabled:
+        bm25 = BM25Retriever.load(config.bm25.index_path)
+        if bm25 is None:
+            print("Warning: BM25 index not found — run 'index' first to build it",
+                  file=sys.stderr)
+
     retriever = Retriever(
         embedder=embedder,
         vector_store=store,
@@ -169,6 +197,8 @@ def cmd_search(
         prefer_active=config.metadata.prefer_active,
         topic_boost=config.metadata.topic_boost,
         reranker=reranker,
+        bm25_retriever=bm25,
+        bm25_weight=0.3,
     )
 
     results = retriever.retrieve(query)
@@ -248,12 +278,14 @@ def main() -> None:
 
     config = load_config(str(config_path))
 
-    # Resolve data and vector_store paths relative to the config file directory
+    # Resolve relative paths against config file directory
     config_dir = config_path.parent
     if not Path(config.data.path).is_absolute():
         config.data.path = str(config_dir / config.data.path)
     if not Path(config.vector_store.path).is_absolute():
         config.vector_store.path = str(config_dir / config.vector_store.path)
+    if not Path(config.bm25.index_path).is_absolute():
+        config.bm25.index_path = str(config_dir / config.bm25.index_path)
 
     if args.command == "index":
         cmd_index(config)

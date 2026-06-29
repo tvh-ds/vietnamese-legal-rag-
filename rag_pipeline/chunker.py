@@ -31,7 +31,15 @@ _CHARS_PER_TOKEN = 3.0
 
 # Cache for the real tokenizer (lazy-loaded)
 _tokenizer = None
-_TOKENIZER_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+_tokenizer_model = "keepitreal/vietnamese-sbert"
+
+
+def set_tokenizer_model(model_name: str) -> None:
+    """Set the tokenizer model name (should match the embedding model)."""
+    global _tokenizer, _tokenizer_model
+    if model_name != _tokenizer_model:
+        _tokenizer = None  # Force reload with new model
+        _tokenizer_model = model_name
 
 
 def _get_tokenizer():
@@ -53,13 +61,13 @@ def _get_tokenizer():
             # Try local-only first, fall back to download
             try:
                 _tokenizer = AutoTokenizer.from_pretrained(
-                    _TOKENIZER_MODEL,
+                    _tokenizer_model,
                     model_max_length=10_000_000,
                     local_files_only=True,
                 )
             except (OSError, FileNotFoundError, EnvironmentError):
                 _tokenizer = AutoTokenizer.from_pretrained(
-                    _TOKENIZER_MODEL,
+                    _tokenizer_model,
                     model_max_length=10_000_000,
                 )
         except Exception:

@@ -21,8 +21,9 @@ chunking:
 # ---------------------------------------------------------------------------
 embedding:
   # sentence-transformers model name
-  # Vietnamese-compatible multilingual model (384-dim)
-  model_name: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+  # Vietnamese-specific model (768-dim, PhoBERT-based)
+  # Alternatives: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2" (384-dim, multilingual)
+  model_name: "keepitreal/vietnamese-sbert"
   
   # Batch size for embedding generation
   batch_size: 32
@@ -56,6 +57,25 @@ query_rewriter:
   # Append legal-domain context phrase for short queries
   append_context: true
   context_phrase: "theo pháp luật hiện hành"
+
+# ---------------------------------------------------------------------------
+# BM25 sparse retrieval (Section 10 enhancement)
+# ---------------------------------------------------------------------------
+bm25:
+  # Enable BM25 + Vector hybrid retrieval
+  enabled: true
+  
+  # Number of candidates from BM25 to fuse with vector results
+  top_k: 20
+  
+  # k1 parameter: term frequency saturation (1.2–2.0 typical)
+  k1: 1.5
+  
+  # b parameter: document length normalization (0.75 typical)
+  b: 0.75
+  
+  # Path to persist BM25 index (relative to config.yaml)
+  index_path: "./chroma_db/bm25_index.pkl"
 
 # ---------------------------------------------------------------------------
 # Retrieval parameters (Section 10 of Pipeline.md)
