@@ -22,12 +22,13 @@ chunking:
 # ---------------------------------------------------------------------------
 embedding:
   # sentence-transformers model name
-  # Vietnamese legal model (1024-dim, BGE-M3 fine-tuned on Pháp điển, 8194-token context)
+  # AITeamVN/Vietnamese_Embedding: 1024-dim, 2048-token context, BGE-M3 backbone
+  #   Zalo Legal benchmark: Acc@1=0.727, MRR@10=0.818
   # Alternatives:
-  #   "keepitreal/vietnamese-sbert" — 768-dim, 256-token limit, Vietnamese general
-  #   "AITeamVN/Vietnamese_Embedding" — 1024-dim, 2048-token, VI-general
-  #   "BAAI/bge-m3" — 1024-dim, 8194-token, multilingual
-  model_name: "tutran27/vietnamese-legal-phapdien-embedding-v1"
+  #   "tutran27/vietnamese-legal-phapdien-embedding-v1" — 1024-dim, 768-token, legal-only
+  #   "BAAI/bge-m3" — 1024-dim, 8194-token, multilingual (no VI fine-tune)
+  #   "keepitreal/vietnamese-sbert" — 768-dim, 256-token, PhoBERT (too short)
+  model_name: "AITeamVN/Vietnamese_Embedding"
   
   # Batch size for embedding generation (lower for 1024-dim models on CPU)
   batch_size: 16
