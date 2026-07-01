@@ -14,6 +14,9 @@ env/
 chroma_db/
 rag_pipeline/chroma_db/
 
+# Large corpus files (>100MB — keep locally)
+corpus/vlqa/legal_corpus.json
+
 # IDE / editor
 .vscode/
 .idea/

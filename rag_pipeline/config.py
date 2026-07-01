@@ -51,6 +51,7 @@ class BM25Config:
     top_k: int = 20
     k1: float = 1.5
     b: float = 0.75
+    fusion_weight: float = 0.5
     index_path: str = "./chroma_db/bm25_index.pkl"
 
 

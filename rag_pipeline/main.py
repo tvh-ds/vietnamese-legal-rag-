@@ -198,7 +198,7 @@ def cmd_search(
         topic_boost=config.metadata.topic_boost,
         reranker=reranker,
         bm25_retriever=bm25,
-        bm25_weight=0.3,
+        bm25_weight=config.bm25.fusion_weight,
     )
 
     results = retriever.retrieve(query)

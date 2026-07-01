@@ -8,25 +8,29 @@
 # ---------------------------------------------------------------------------
 chunking:
   # Maximum tokens per chunk before recursive splitting
-  max_tokens: 512
+  # Model has 8194 context window — 1024 balances context vs granularity
+  max_tokens: 1024
   
   # Minimum tokens per chunk; shorter chunks merged with adjacent ones
   min_tokens: 30
   
-  # Token overlap for sliding-window fallback (0 = no overlap)
-  overlap_tokens: 0
+  # Token overlap for sliding-window fallback (prevents splitting at boundaries)
+  overlap_tokens: 50
 
 # ---------------------------------------------------------------------------
 # Embedding model (Section 7 of Pipeline.md)
 # ---------------------------------------------------------------------------
 embedding:
   # sentence-transformers model name
-  # Vietnamese-specific model (768-dim, PhoBERT-based)
-  # Alternatives: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2" (384-dim, multilingual)
-  model_name: "keepitreal/vietnamese-sbert"
+  # Vietnamese legal model (1024-dim, BGE-M3 fine-tuned on Pháp điển, 8194-token context)
+  # Alternatives:
+  #   "keepitreal/vietnamese-sbert" — 768-dim, 256-token limit, Vietnamese general
+  #   "AITeamVN/Vietnamese_Embedding" — 1024-dim, 2048-token, VI-general
+  #   "BAAI/bge-m3" — 1024-dim, 8194-token, multilingual
+  model_name: "tutran27/vietnamese-legal-phapdien-embedding-v1"
   
-  # Batch size for embedding generation
-  batch_size: 32
+  # Batch size for embedding generation (lower for 1024-dim models on CPU)
+  batch_size: 16
   
   # Device: "cpu", "cuda", or "auto" (auto-detects GPU)
   device: "cpu"
@@ -74,6 +78,9 @@ bm25:
   # b parameter: document length normalization (0.75 typical)
   b: 0.75
   
+  # Weight for BM25 scores in hybrid fusion (0.0 = pure vector, 1.0 = pure BM25)
+  fusion_weight: 0.5
+  
   # Path to persist BM25 index (relative to config.yaml)
   index_path: "./chroma_db/bm25_index.pkl"
 
@@ -84,8 +91,8 @@ retrieval:
   # Number of top chunks to return from vector search
   top_k: 10
   
-  # Minimum cosine similarity threshold (0.0 - 1.0)
-  similarity_threshold: 0.3
+  # Minimum cosine similarity threshold (0.0 = keep all, let reranker decide)
+  similarity_threshold: 0.0
   
   # Enable metadata post-filtering (status, effectiveDate, topic)
   enable_metadata_filtering: true

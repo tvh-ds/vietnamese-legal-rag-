@@ -54,7 +54,7 @@ class Retriever:
         topic_boost: bool = True,
         reranker: Reranker | None = None,
         bm25_retriever: BM25Retriever | None = None,
-        bm25_weight: float = 0.3,
+        bm25_weight: float = 0.5,
     ) -> None:
         self.embedder = embedder
         self.vector_store = vector_store

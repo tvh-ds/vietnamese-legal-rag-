@@ -99,7 +99,7 @@ class Benchmark:
             topic_boost=self.config.metadata.topic_boost,
             reranker=reranker,
             bm25_retriever=bm25,
-            bm25_weight=0.3,
+            bm25_weight=self.config.bm25.fusion_weight,
         )
 
         # 4. Evaluate
