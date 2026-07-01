@@ -53,18 +53,65 @@ class Benchmark:
         questions_path: str,
         max_questions: Optional[int] = None,
     ) -> dict:
-        """Run the full benchmark: index → evaluate.
+        """Run the full benchmark: index → evaluate."""
+        store, bm25, articles = self._index_corpus(corpus_path)
+        return self._evaluate(store, bm25, articles, questions_path, max_questions)
 
-        Returns dict with recall@10 and per-question details.
-        """
-        # 1. Index the corpus
+    def evaluate_prebuilt(
+        self,
+        questions_path: str,
+        max_questions: Optional[int] = None,
+    ) -> dict:
+        """Evaluate using pre-built vector store (skip indexing)."""
+        import json as _json
+
+        store = VectorStore(
+            path=self.config.vector_store.path + "_benchmark",
+            collection_name="benchmark_corpus",
+        )
+        if store.count() == 0:
+            raise RuntimeError("Store is empty. Run 'split_workflow.py store' first.")
+
+        # Load articles for retriever (needed for graph expansion, minimal here)
+        articles = []
+
+        # Try loading BM25 if available
+        bm25 = None
+        if self.config.bm25.enabled:
+            bm25 = BM25Retriever.load(self.config.bm25.index_path + "_benchmark")
+        # If BM25 not prebuilt, build it from store contents
+        if bm25 is None and self.config.bm25.enabled:
+            logger.info("Building BM25 from prebuilt store…")
+            bm25 = BM25Retriever(
+                k1=self.config.bm25.k1, b=self.config.bm25.b,
+                top_k=self.config.bm25.top_k,
+            )
+            # Extract chunks from store for BM25
+            from pipeline_types import RetrievalResult
+            all_data = store.collection.get(include=["documents", "metadatas"])
+            bm25_chunks = []
+            for i, cid in enumerate(all_data["ids"]):
+                bm25_chunks.append(RetrievalResult(
+                    chunk_id=cid,
+                    content=all_data["documents"][i],
+                    raw_content="",
+                    article_id=all_data["metadatas"][i].get("article_id", ""),
+                    unit_type=all_data["metadatas"][i].get("unit_type", "ARTICLE"),
+                    order=0, hierarchy_path="", score=0.0, source="", metadata={},
+                ))
+            bm25.build_index(bm25_chunks)
+
+        return self._evaluate(store, bm25, articles, questions_path, max_questions)
+
+    def _evaluate(
+        self, store, bm25, articles, questions_path, max_questions
+    ) -> dict:
+        """Shared evaluation logic."""
         print("=" * 60)
         print("VLQA Legal RAG — Recall@10 Benchmark")
         print("=" * 60)
 
-        store, bm25, articles = self._index_corpus(corpus_path)
-
-        # 2. Load questions
+        # 1. Load questions
         questions = self._load_questions(questions_path, max_questions)
 
         # 3. Setup retriever
