@@ -15,7 +15,12 @@ chroma_db/
 rag_pipeline/chroma_db/
 
 # Large corpus files (>100MB — keep locally)
-corpus/vlqa/legal_corpus.json
+corpus/
+
+# Temp export files
+*.pkl
+*.npy
+benchmark_results.json
 
 # IDE / editor
 .vscode/

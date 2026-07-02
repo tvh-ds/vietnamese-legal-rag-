@@ -84,6 +84,7 @@ class Retriever:
         query: str,
         top_k: Optional[int] = None,
         filter_topic_id: Optional[str] = None,
+        query_embedding: "np.ndarray | None" = None,
     ) -> list[RetrievalResult]:
         """Run hybrid retrieval for a natural-language query.
 
@@ -91,6 +92,8 @@ class Retriever:
             query: User query in Vietnamese (raw or normalized).
             top_k: Override the default top-k.
             filter_topic_id: If provided, boost results from this topic.
+            query_embedding: Pre-computed embedding vector. If provided,
+                skips embedder — used for GPU-offloaded benchmarks.
 
         Returns:
             Ranked list of RetrievalResult, highest score first.
@@ -98,8 +101,11 @@ class Retriever:
         k = top_k or self.top_k
 
         # Stage 1 — Embed and vector search
-        query_embedding = self.embedder.embed_single(query)
-        vector_results = self.vector_store.query(query_embedding, top_k=k * 2)
+        if query_embedding is not None:
+            q_emb = np.asarray(query_embedding, dtype=np.float32).ravel()
+        else:
+            q_emb = self.embedder.embed_single(query)
+        vector_results = self.vector_store.query(q_emb, top_k=k * 2)
 
         # Convert distance (cosine 0=identical, 2=opposite) to similarity score
         for r in vector_results:

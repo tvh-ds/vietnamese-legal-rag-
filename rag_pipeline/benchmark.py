@@ -86,19 +86,31 @@ class Benchmark:
                 k1=self.config.bm25.k1, b=self.config.bm25.b,
                 top_k=self.config.bm25.top_k,
             )
-            # Extract chunks from store for BM25
+            # Extract chunks from store for BM25 (paginated to avoid SQL limits)
             from pipeline_types import RetrievalResult
-            all_data = store.collection.get(include=["documents", "metadatas"])
             bm25_chunks = []
-            for i, cid in enumerate(all_data["ids"]):
-                bm25_chunks.append(RetrievalResult(
-                    chunk_id=cid,
-                    content=all_data["documents"][i],
-                    raw_content="",
-                    article_id=all_data["metadatas"][i].get("article_id", ""),
-                    unit_type=all_data["metadatas"][i].get("unit_type", "ARTICLE"),
-                    order=0, hierarchy_path="", score=0.0, source="", metadata={},
-                ))
+            page_size = 5000
+            offset = 0
+            total = store.count()
+            while offset < total:
+                batch = store.collection.get(
+                    include=["documents", "metadatas"],
+                    limit=page_size,
+                    offset=offset,
+                )
+                if not batch["ids"]:
+                    break
+                for i, cid in enumerate(batch["ids"]):
+                    bm25_chunks.append(RetrievalResult(
+                        chunk_id=cid,
+                        content=batch["documents"][i],
+                        raw_content="",
+                        article_id=batch["metadatas"][i].get("article_id", ""),
+                        unit_type=batch["metadatas"][i].get("unit_type", "ARTICLE"),
+                        order=0, hierarchy_path="", score=0.0, source="", metadata={},
+                    ))
+                offset += page_size
+                logger.info("BM25 build: loaded %d/%d chunks", min(offset, total), total)
             bm25.build_index(bm25_chunks)
 
         return self._evaluate(store, bm25, articles, questions_path, max_questions)
@@ -195,6 +207,137 @@ class Benchmark:
             "total_questions": len(questions),
             "hits": hits,
             "per_question": per_question,
+        }
+
+    def evaluate_with_query_embeddings(
+        self,
+        questions_path: str,
+        query_embeddings_path: str,
+        max_questions: Optional[int] = None,
+    ) -> dict:
+        """Evaluate using pre-computed query embeddings (GPU-offloaded).
+
+        Same full pipeline as evaluate_prebuilt — ChromaDB + BM25 + reranker —
+        but reads query vectors from a .npy file instead of loading the model.
+
+        Args:
+            questions_path: Path to benchmark questions JSON.
+            query_embeddings_path: Path to .npy file with shape (N, dim).
+            max_questions: Limit number of questions.
+        """
+        import numpy as np
+
+        # Load query embeddings
+        query_embeddings = np.load(query_embeddings_path)
+        print(f"Loaded query embeddings: shape={query_embeddings.shape}")
+
+        # Load store + BM25 (same as evaluate_prebuilt)
+        store = VectorStore(
+            path=self.config.vector_store.path + "_benchmark",
+            collection_name="benchmark_corpus",
+        )
+        if store.count() == 0:
+            raise RuntimeError("Store is empty. Run 'split_workflow.py store' first.")
+
+        articles = []
+        bm25 = None
+        if self.config.bm25.enabled:
+            bm25 = BM25Retriever.load(self.config.bm25.index_path + "_benchmark")
+        if bm25 is None and self.config.bm25.enabled:
+            logger.info("Building BM25 from prebuilt store…")
+            bm25 = BM25Retriever(
+                k1=self.config.bm25.k1, b=self.config.bm25.b,
+                top_k=self.config.bm25.top_k,
+            )
+            from pipeline_types import RetrievalResult
+            bm25_chunks = []
+            page_size, offset, total = 5000, 0, store.count()
+            while offset < total:
+                batch = store.collection.get(include=["documents", "metadatas"], limit=page_size, offset=offset)
+                if not batch["ids"]: break
+                for j, cid in enumerate(batch["ids"]):
+                    bm25_chunks.append(RetrievalResult(
+                        chunk_id=cid, content=batch["documents"][j], raw_content="",
+                        article_id=batch["metadatas"][j].get("article_id", ""),
+                        unit_type=batch["metadatas"][j].get("unit_type", "ARTICLE"),
+                        order=0, hierarchy_path="", score=0.0, source="", metadata={},
+                    ))
+                offset += page_size
+            bm25.build_index(bm25_chunks)
+
+        # Load questions
+        questions = self._load_questions(questions_path, max_questions)
+        n = min(len(questions), query_embeddings.shape[0])
+
+        # Setup retriever WITHOUT embedder (pass a dummy — unused when query_embedding is given)
+        # We pass None as embedder and rely on query_embedding param
+        embedder = Embedder(model_name=self.config.embedding.model_name, device="cpu")
+        rewriter = QueryRewriter(
+            append_context=self.config.query_rewriter.append_context,
+            expand_abbreviations=self.config.query_rewriter.expand_abbreviations,
+            context_phrase=self.config.query_rewriter.context_phrase,
+        ) if self.config.query_rewriter.enabled else None
+        reranker = Reranker(
+            lambda_mmr=self.config.reranker.lambda_mmr,
+            keyword_boost=self.config.reranker.keyword_boost,
+            diversity_weight=self.config.reranker.diversity_weight,
+        ) if self.config.reranker.enabled else None
+
+        retriever = Retriever(
+            embedder=embedder, vector_store=store, articles=articles,
+            top_k=self.config.retrieval.top_k,
+            similarity_threshold=self.config.retrieval.similarity_threshold,
+            enable_metadata_filtering=self.config.retrieval.enable_metadata_filtering,
+            enable_graph_expansion=False,
+            vector_weight=self.config.retrieval.vector_weight,
+            metadata_boost=self.config.retrieval.metadata_boost,
+            graph_boost=0.0,
+            prefer_active=self.config.metadata.prefer_active,
+            topic_boost=self.config.metadata.topic_boost,
+            reranker=reranker, bm25_retriever=bm25,
+            bm25_weight=self.config.bm25.fusion_weight,
+        )
+
+        # Evaluate
+        print(f"\nEvaluating {n} questions (Recall@10)…")
+        hits = 0
+        per_question: list[dict] = []
+
+        for i in range(n):
+            q = questions[i]
+            query_text = q["question"]
+            relevant = set(str(law_id) for law_id in q["relevant_laws"])
+
+            if rewriter is not None:
+                query_text = rewriter.rewrite(query_text)
+
+            # Pre-computed embedding bypasses embedder
+            results = retriever.retrieve(
+                query_text, top_k=10,
+                query_embedding=query_embeddings[i],
+            )
+            retrieved_ids = {r.article_id for r in results}
+            overlap = retrieved_ids & relevant
+            hit = len(overlap) > 0
+            if hit: hits += 1
+
+            per_question.append({
+                "qid": q["qid"], "question": q["question"][:100],
+                "relevant_count": len(relevant), "retrieved_count": len(results),
+                "hit": hit, "overlap": list(overlap)[:5],
+            })
+
+            if (i + 1) % 100 == 0:
+                print(f"  [{i + 1}/{n}] Recall@10: {hits / (i + 1):.4f}")
+
+        recall = hits / n if n else 0.0
+        print(f"\n{'=' * 40}")
+        print(f"Recall@10: {recall:.4f}  ({hits}/{n})")
+        print(f"{'=' * 40}")
+
+        return {
+            "recall_at_10": recall, "total_questions": n,
+            "hits": hits, "per_question": per_question,
         }
 
     # -- indexing ------------------------------------------------------------
