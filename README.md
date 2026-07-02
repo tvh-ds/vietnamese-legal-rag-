@@ -1,311 +1,417 @@
-# VBQPPL Legal RAG — Chunking + Retrieval Pipeline
+# Vietnamese Legal RAG — Chunking + Retrieval Pipeline
 
-Vietnamese legal document chunking and semantic retrieval pipeline for building a RAG-powered legal chatbot. Processes parsed VBQPPL JSON documents through recursive semantic chunking, embedding, and hybrid retrieval.
+A production-ready pipeline for chunking Vietnamese legal documents (VBQPPL), generating embeddings, and performing hybrid retrieval for RAG-powered legal Q&A. Implements the specification in [`Pipeline.md`](Pipeline.md).
+
+---
+
+## Quickstart
+
+### 1. Clone and install
+
+```bash
+git clone https://github.com/tvh-ds/vietnamese-legal-rag-.git
+cd vietnamese-legal-rag-
+pip install -r rag_pipeline/requirements.txt
+```
+
+### 2. Set up API keys
+
+This pipeline uses two company-hosted APIs. Export the keys as environment variables:
+
+```powershell
+# PowerShell
+$env:EMBEDDING_API_KEY = "your-embedding-api-key"
+$env:LLM_API_KEY = "your-llm-api-key"
+```
+
+```bash
+# Bash
+export EMBEDDING_API_KEY="your-embedding-api-key"
+export LLM_API_KEY="your-llm-api-key"
+```
+
+### 3. Configure API endpoints
+
+Edit `rag_pipeline/config.yaml` — replace the placeholder URLs with your company's actual endpoints:
+
+```yaml
+embedding:
+  api:
+    url: "https://your-company.com/v1/embeddings"          # ← change this
+
+context:
+  llm:
+    url: "https://your-company.com/v1/chat/completions"    # ← change this
+```
+
+### 4. Add your data
+
+Place your JSON files in the `data/` directory. See [Data input](#data-input) for supported formats.
+
+### 5. Index
+
+```bash
+python rag_pipeline/main.py -c rag_pipeline/config.yaml index
+```
+
+This runs the full offline pipeline: load → chunk → embed → store.
+
+### 6. Search
+
+```bash
+python rag_pipeline/main.py -c rag_pipeline/config.yaml search "thủ tục đấu giá tài sản"
+```
+
+### 7. Benchmark (with VLQA corpus)
+
+```bash
+python rag_pipeline/benchmark.py \
+  --corpus corpus/vlqa/legal_corpus.json \
+  --questions corpus/vlqa/1238_question_map_phap_dien.json \
+  --config rag_pipeline/config.yaml \
+  -n 50
+```
+
+---
 
 ## Project structure
 
 ```
-Chunking Pipeline/
-├── Pipeline.md                  # Pipeline specification (design doc)
-├── data/                        # Input: parsed VBQPPL JSON files (11 files)
-│   ├── chu_de_4.json
-│   ├── chu_de_5.json
-│   └── ...
+.
+├── Pipeline.md                         # Full pipeline specification
+├── data/                               # Input JSON files (your data)
+│   ├── chu_de_1.json … chu_de_45.json
 ├── rag_pipeline/
-│   ├── config.yaml              # All tunable parameters
-│   ├── config.py                # Config loader (dataclass-based)
-│   ├── data_loader.py           # JSON parser → Article objects
-│   ├── chunker.py               # Recursive semantic chunker
-│   ├── embedder.py              # Sentence-transformers wrapper
-│   ├── vector_store.py          # ChromaDB vector store
-│   ├── query_rewriter.py        # Vietnamese legal query normalizer
-│   ├── reranker.py              # MMR diversity reranker
-│   ├── retriever.py             # Hybrid retrieval orchestrator
-│   ├── pipeline_types.py        # Shared types
-│   ├── main.py                  # CLI entry point
-│   ├── requirements.txt         # Python dependencies
-│   └── chroma_db/               # Persisted vector database (24,395 chunks)
-└── README.md                    # This file
+│   ├── config.yaml                     # ⚙ All tunable parameters
+│   ├── config.py                       # Config loader (env var resolution)
+│   ├── main.py                         # CLI: index / search
+│   ├── benchmark.py                    # Recall@10 evaluation
+│   │
+│   ├── data_loader.py                  # JSON parser (chu_de_* format)
+│   ├── corpus_loader.py                # JSON parser (VLQA corpus format)
+│   │
+│   ├── chunker.py                      # Recursive semantic chunker
+│   ├── context_generator.py            # LLM-powered article summarizer
+│   │
+│   ├── embedder.py                     # Local + API embedding backends
+│   ├── vector_store.py                 # ChromaDB persistent store
+│   ├── bm25_retriever.py              # BM25 sparse retrieval
+│   │
+│   ├── query_rewriter.py              # Vietnamese query normalization
+│   ├── retriever.py                   # Hybrid: vector + BM25 + graph
+│   ├── reranker.py                    # MMR diversity + keyword boost
+│   ├── pipeline_types.py              # Shared dataclasses
+│   │
+│   └── requirements.txt               # Python dependencies
+├── .gitignore
+└── README.md
 ```
 
-## Quickstart
+---
 
-### 1. Install dependencies
+## Data input
 
-```bash
-pip install -r rag_pipeline/requirements.txt
-```
+### Format A — VBQPPL parsed JSON (`data/chu_de_*.json`)
 
-Requirements: `chromadb`, `sentence-transformers`, `transformers`, `pyyaml`, `numpy`, `tqdm`.
+Used by `data_loader.py`. Hierarchical structure: topic → section → chapter → article.
 
-The embedding model (`paraphrase-multilingual-MiniLM-L12-v2`, ~420 MB) downloads automatically on first use and caches in `~/.cache/huggingface/`.
-
-### 2. Search the existing index
-
-The vector database is pre-built with 24,395 chunks from 14,962 Vietnamese legal articles. Searching works immediately:
-
-```bash
-# Basic search
-python rag_pipeline/main.py -c rag_pipeline/config.yaml search "thủ tục đấu giá tài sản"
-
-# Telex / no-diacritics input (query rewriter expands abbreviations)
-python rag_pipeline/main.py -c rag_pipeline/config.yaml search "dk cap giay phep xay dung"
-
-# Limit number of results
-python rag_pipeline/main.py -c rag_pipeline/config.yaml search "điều kiện ứng cử đại biểu" -k 3
-
-# Skip query rewriting (search raw input as-is)
-python rag_pipeline/main.py -c rag_pipeline/config.yaml search "some raw query" --raw
-```
-
-### 3. Rebuild the index (optional)
-
-To re-index from scratch after changing config or data:
-
-```bash
-python rag_pipeline/main.py -c rag_pipeline/config.yaml index
-```
-
-This clears the existing ChromaDB collection and runs the full pipeline: load → chunk → embed → store.
-
-## Loading your own data
-
-### Data format
-
-The loader expects JSON files with this schema (same as the existing `data/*.json` files):
-
-```
-Root array
-└── Topic entry
-    ├── "Chủ đề ID": "<uuid>"
-    ├── "Tên chủ đề": "<topic name>"
-    ├── "Chương ID": "<uuid>"
-    ├── "Tên chương": "<chapter title>"
-    └── "Các điều": [                    ← array of articles
-        {
-          "Điều ID": "<uuid>",
-          "Tên điều": "<article title>",
-          "Nội dung": "<legal text>",    ← this gets chunked
-          "Ghi chú": {
-            "Ghi chú": "<citation>",     ← extracts document type & ID
-            "metadata": [
-              { "Hiệu lực": "<date>", "Thi hành": "<status>", "Link": "<url>" }
-            ]
-          },
-          "Chỉ dẫn": [                   ← cross-references for graph expansion
-            { "Điều liên quan": "...", "ID Điều li quan": "<id>", "Link": "#" }
+```json
+[
+  {
+    "Chủ đề ID": "<uuid>",
+    "Tên chủ đề": "Bổ trợ tư pháp",
+    "Chương ID": "<uuid>",
+    "Tên chương": "Chương I NHỮNG QUY ĐỊNH CHUNG",
+    "Các điều": [
+      {
+        "Điều ID": "D45AE0D8-...",
+        "Tên điều": "Điều 4.1.LQ.1. Phạm vi điều chỉnh",
+        "Nội dung": "Luật này quy định về...",
+        "Ghi chú": {
+          "Ghi chú": "Điều 1 Luật số 01/2016/QH14...",
+          "metadata": [
+            {
+              "Hiệu lực": "01/07/2017",
+              "Thi hành": "CÓ_HIỆU_LỰC_THI_HÀNH",
+              "Link": "http://vbpl.vn/..."
+            }
           ]
-        }
-      ]
+        },
+        "Chỉ dẫn": [
+          {
+            "Điều liên quan": "Điều 28.3.LQ.82...",
+            "ID Điều liên quan": "28003000...",
+            "Link": "#"
+          }
+        ]
+      }
+    ]
+  }
+]
 ```
 
-If your JSON files follow this schema, they work as-is. If the schema differs, adapt `data_loader.py`.
+The loader extracts: `article_id`, `title`, `content` (Nội dung — what gets chunked), document metadata from Ghi chú, and cross-references from Chỉ dẫn.
 
-### Method A — Point the pipeline at a new data directory
+### Format B — VLQA legal corpus (`legal_corpus.json`)
 
-1. Place your JSON files in a directory (e.g., `my_data/`)
-2. Update `rag_pipeline/config.yaml`:
+Used by `corpus_loader.py`. Flat list of laws, each containing articles identified by numeric `aid`.
+
+```json
+[
+  {
+    "id": 0,
+    "law_id": "14/2022/TT-NHNN",
+    "content": [
+      {"aid": 56789, "content_Article": "1. Thông tư này quy định..."}
+    ]
+  }
+]
+```
+
+The loader maps `aid` → `article_id` so benchmark `relevant_laws` match correctly. Used with `benchmark.py`.
+
+### Adding new data
+
+Point the config at your directory:
 
 ```yaml
 data:
-  path: "../my_data"    # relative to config.yaml; or an absolute path
+  path: "../my_data"    # relative to config.yaml
 ```
 
-3. Rebuild the index:
+Then re-index. For custom schemas, adapt `data_loader.py` — the only contract is that it produces objects with `.article_id`, `.title`, `.content`, and `.references` attributes.
 
-```bash
-python rag_pipeline/main.py -c rag_pipeline/config.yaml index
+---
+
+## Full pipeline — phase by phase
+
+### Phase 1 — Structure parsing
+
+| File | Tool / method |
+|------|---------------|
+| `data_loader.py` | JSON walker — flattens topic → section → chapter → article hierarchy |
+| `corpus_loader.py` | JSON walker — maps `aid` integers to article IDs for benchmark matching |
+
+Extracts document metadata (law number, effective date, validity status), structural metadata (chapter, topic, mapCode), and cross-references (Chỉ dẫn) from each article. Only the Article level downward contains meaningful legal text.
+
+### Phase 2 — Recursive semantic chunking
+
+| File | Tool / method |
+|------|---------------|
+| `chunker.py` | **Recursive Clause → Point → Paragraph → Sentence splitting** |
+
+The algorithm (`Pipeline.md` §3):
+
+1. **Article fits under `max_tokens`?** → keep as one chunk (`ARTICLE`)
+2. **Too large?** → split by numbered clauses: regex `^\d+\.\s` → `CLAUSE` chunks
+3. **Clause too large?** → split by lettered points: regex `^[a-đ]\)\s` → `POINT` chunks
+4. **No Clause/Point structure?** → split by double-newline paragraphs → `PARAGRAPH` chunks
+5. **Still too large?** → sentence-aware split on Vietnamese boundaries → `SENTENCE` chunks
+
+**Quality validation** (`Pipeline.md` §4):
+- Merge short chunks (< `min_tokens`) with adjacent ones
+- Remove exact-duplicate content
+- Preserve sentence boundaries — no mid-sentence cuts
+
+**Token counting**: Uses the HuggingFace tokenizer matching the configured embedding model for accurate counts. Falls back to character-heuristic if unavailable.
+
+### Phase 3 — Context generation & injection
+
+| File | Tool / method |
+|------|---------------|
+| `context_generator.py` | **LLM API** — `gemma-4-31B-it` via company chat completions endpoint |
+
+Per `Pipeline.md` §5: A 60–120 token Vietnamese legal summary is generated for each article by the LLM. Prompt template:
+
+> "Bạn là trợ lý pháp lý. Tóm tắt điều luật sau bằng tiếng Việt trong 2-3 câu..."
+
+The summary is **prepended** to every chunk from that article before embedding. This ensures no chunk is isolated from its article's overall context. Falls back to heuristic (title + first sentence) on API failure.
+
+Config: `context.use_llm`, `context.llm.*` in `config.yaml`.
+
+### Phase 4 — Embedding
+
+| File | Tool / method |
+|------|---------------|
+| `embedder.py` | **Company Embedding API** — `Vietnamese_Embedding` (1024-dim, 2048-token max) |
+
+Chunks are batched (64 per API call) and sent to the embedding endpoint. Returns normalized 1024-dim float32 vectors.
+
+**Also supports local mode** — set `embedding.backend: "local"` to use `AITeamVN/Vietnamese_Embedding` via sentence-transformers. The `create_embedder()` factory in `embedder.py` handles switching.
+
+### Phase 5 — Vector storage
+
+| File | Tool / method |
+|------|---------------|
+| `vector_store.py` | **ChromaDB** — persistent, cosine-distance, HNSW-indexed |
+
+Each chunk stored as:
+- `embedding_vector`: 1024-dim float32
+- `content`: context-injected chunk text
+- `metadata`: article_id, unit_type, document_id, status, topic_id, topic_name, chapter_title, map_code, hierarchy_path, etc.
+
+Metadata is stored alongside embeddings but **not** used in the embedding process — used only for filtering/boosting during retrieval (`Pipeline.md` §6).
+
+### Phase 6 — BM25 sparse index
+
+| File | Tool / method |
+|------|---------------|
+| `bm25_retriever.py` | **rank-bm25** (Okapi BM25) with **pyvi** Vietnamese word segmentation |
+
+Built in parallel with the vector store. pyvi handles compound Vietnamese words: `"đấu_giá"`, `"giấy_phép"`, `"xây_dựng"`. Parameters: `k1=1.5`, `b=0.75`. Index persisted as pickle alongside ChromaDB.
+
+### Phase 7 — Retrieval (per query)
+
+| Stage | File | What happens |
+|-------|------|-------------|
+| **Query rewriting** | `query_rewriter.py` | Expands legal abbreviations (`dk` → `điều kiện`, `bhxh` → `bảo hiểm xã hội`). Appends domain context (`"theo pháp luật hiện hành"`) for short queries. |
+| **Vector search** | `vector_store.py` | Cosine similarity top-k via ChromaDB |
+| **BM25 search** | `bm25_retriever.py` | Parallel exact-term matching via Okapi BM25 |
+| **Score fusion** | `retriever.py` | Weighted blend: `(1 − fusion_weight) × vector + fusion_weight × BM25`. Default 50/50. |
+| **Metadata boost** | `retriever.py` | Prefer ACTIVE documents, matching topic, ARTICLE/CLAUSE-level chunks |
+| **Graph expansion** | `retriever.py` | Follows Chỉ dẫn cross-references to pull in related articles |
+| **Reranker** | `reranker.py` | MMR (Maximal Marginal Relevance) balances relevance with diversity. `λ=0.7` relevance, keyword overlap bonus, diversity penalty. |
+
+### Phase 8 — Benchmarking
+
+| File | Tool / method |
+|------|---------------|
+| `benchmark.py` | **Recall@10** on VLQA question set |
+
+For each of 1,238 questions: retrieve top-10 chunks, check if any `article_id` matches the question's `relevant_laws`. Reports `hits / total_questions`.
+
+---
+
+## Configuration reference
+
+Key sections in `config.yaml`:
+
+### `chunking`
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `max_tokens` | 1024 | Split threshold — articles larger than this are recursively split |
+| `min_tokens` | 30 | Merge chunks shorter than this with adjacent ones |
+| `overlap_tokens` | 50 | Token overlap between adjacent chunks (prevents boundary cuts) |
+
+### `embedding`
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `backend` | `api` | `api` (company endpoint) or `local` (sentence-transformers) |
+| `model_name` | `AITeamVN/Vietnamese_Embedding` | Model for local mode |
+| `api.url` | (placeholder) | Embedding API endpoint |
+| `api.model` | `Vietnamese_Embedding` | Model name sent to API |
+| `api.max_seq_length` | 2048 | Max tokens per input |
+| `api.batch_size` | 64 | Texts per API call |
+
+### `context`
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `true` | Whether to prepend context to chunks |
+| `use_llm` | `true` | Use LLM API for summaries (false = heuristic) |
+| `max_context_tokens` | 100 | Target summary length |
+| `llm.model` | `gemma-4-31B-it` | Model for context generation |
+| `llm.temperature` | 0.3 | Sampling temperature |
+| `llm.max_output_tokens` | 120 | Max summary tokens |
+
+### `bm25`
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `true` | Enable BM25 sparse retrieval |
+| `fusion_weight` | 0.5 | BM25 weight in hybrid score (0 = pure vector, 1 = pure BM25) |
+| `k1` | 1.5 | Term frequency saturation |
+| `b` | 0.75 | Document length normalization |
+
+### `retrieval`
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `top_k` | 10 | Max results per query |
+| `similarity_threshold` | 0.0 | Minimum score cutoff (0 = keep all) |
+| `vector_weight` | 0.7 | Vector relevance weight before BM25 fusion |
+| `enable_graph_expansion` | `true` | Follow article cross-references |
+
+### `reranker`
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `true` | Enable MMR reranking |
+| `lambda_mmr` | 0.7 | Relevance vs diversity (1 = pure relevance) |
+| `keyword_boost` | 0.15 | Weight for keyword overlap bonus |
+| `diversity_weight` | 0.15 | Weight for diversity penalty |
+
+---
+
+## Chunk output schema
+
+Each chunk stored in ChromaDB:
+
+| Field | Type | Example |
+|-------|------|---------|
+| `chunk_id` | UUID | `017eb4cf-...` |
+| `article_id` | str | `D45AE0D8-...` |
+| `unit_type` | enum | `ARTICLE` / `CLAUSE` / `POINT` / `PARAGRAPH` / `SENTENCE` |
+| `content` | str | `"Điều: Nguyên tắc bầu cử.\nViệc bầu cử..."` |
+| `raw_content` | str | `"Việc bầu cử..."` (before context injection) |
+| `token_count` | int | `87` |
+| `hierarchy_path` | str | `article_id/clause_1/point_b` |
+| `document_id` | str | `85/2015/QH13` |
+| `document_type` | str | `Luật` |
+| `effective_date` | str | `01/09/2015` |
+| `status` | str | `CÓ_HIỆU_LỰC_THI_HÀNH` |
+| `topic_id` | str | `3fc1ee9d-...` |
+| `topic_name` | str | `Tổ chức bộ máy nhà nước` |
+| `chapter_title` | str | `Chương I NHỮNG QUY ĐỊNH CHUNG` |
+| `map_code` | str | `35001000...` |
+
+---
+
+## API response formats
+
+The pipeline expects these JSON shapes from your company endpoints.
+
+### Embedding API (`POST /v1/embeddings`)
+
+**Request:**
+```json
+{
+  "model": "Vietnamese_Embedding",
+  "input": ["text chunk 1", "text chunk 2"]
+}
 ```
 
-### Method B — Incremental add via Python API
-
-Add new articles without rebuilding the entire index:
-
-```python
-import sys; sys.path.insert(0, 'rag_pipeline')
-
-from data_loader import load_articles
-from chunker import Chunker
-from embedder import Embedder
-from vector_store import VectorStore
-
-# 1. Load your new JSON files
-articles = load_articles("path/to/your/data")
-
-# 2. Chunk
-chunker = Chunker(max_tokens=512, min_tokens=30)
-chunks = []
-for art in articles:
-    chunks.extend(chunker.chunk_article(art))
-
-print(f"Produced {len(chunks)} chunks")
-
-# 3. Embed
-embedder = Embedder()
-embeddings = embedder.embed([c.content for c in chunks])
-
-# 4. Store — merges with existing chunks (no overwrite, no re-index)
-store = VectorStore(
-    path="rag_pipeline/chroma_db",
-    collection_name="vbqppl_legal_chunks",
-)
-store.upsert(chunks, embeddings)
-print(f"Done. Total chunks in store: {store.count()}")
+**Response:**
+```json
+{
+  "data": [
+    {"embedding": [0.012, -0.034, ...]},
+    {"embedding": [0.008, 0.021, ...]}
+  ]
+}
 ```
 
-Each chunk gets a unique UUID, so existing data is never overwritten. Search immediately reflects new content.
+Also supports `{"embeddings": [[...], [...]]}` format.
 
-## Seeing chunking results
+### LLM API (`POST /v1/chat/completions`)
 
-### During indexing
-
-The `index` command prints chunk statistics:
-
-```
-[2/4] Chunking articles…
-  Produced 29792 chunks in 12.3s
-```
-
-Enable verbose logging for per-article detail:
-
-```bash
-python rag_pipeline/main.py -v -c rag_pipeline/config.yaml index
+**Request:**
+```json
+{
+  "model": "gemma-4-31B-it",
+  "messages": [{"role": "user", "content": "Bạn là trợ lý pháp lý. Tóm tắt..."}],
+  "temperature": 0.3,
+  "max_tokens": 120
+}
 ```
 
-### Via Python API — inspect chunks
-
-```python
-import sys; sys.path.insert(0, 'rag_pipeline')
-
-from data_loader import load_articles
-from chunker import Chunker
-
-articles = load_articles("data")
-chunker = Chunker(max_tokens=512, min_tokens=30)
-
-# Pick one article
-art = articles[0]
-print(f"Article: {art.title}")
-print(f"Content length: {len(art.content)} chars\n")
-
-# Chunk it
-chunks = chunker.chunk_article(art)
-for i, ch in enumerate(chunks, 1):
-    print(f"--- Chunk {i} ---")
-    print(f"  ID:           {ch.chunk_id}")
-    print(f"  Type:         {ch.unit_type}")
-    print(f"  Tokens:       {ch.token_count}")
-    print(f"  Hierarchy:    {ch.hierarchy_path}")
-    print(f"  Topic:        {ch.topic_name}")
-    print(f"  Status:       {ch.status}")
-    print(f"  Content:      {ch.content[:200]}...")
-    print()
+**Response (OpenAI-compatible):**
+```json
+{
+  "choices": [{"message": {"content": "Điều luật này quy định về..."}}]
+}
 ```
 
-### Bulk inspect — chunk type distribution
-
-```python
-import sys; sys.path.insert(0, 'rag_pipeline')
-
-from data_loader import load_articles
-from chunker import Chunker
-
-articles = load_articles("data")
-chunker = Chunker(max_tokens=512, min_tokens=30)
-
-type_counts = {}
-size_buckets = {"<100": 0, "100-300": 0, "300-512": 0, ">512": 0}
-
-for art in articles:
-    for ch in chunker.chunk_article(art):
-        type_counts[ch.unit_type] = type_counts.get(ch.unit_type, 0) + 1
-        tc = ch.token_count
-        if tc < 100:    size_buckets["<100"] += 1
-        elif tc < 300:  size_buckets["100-300"] += 1
-        elif tc <= 512: size_buckets["300-512"] += 1
-        else:           size_buckets[">512"] += 1
-
-print("Unit types:", type_counts)
-print("Sizes:", size_buckets)
-```
-
-### Query the store directly — see stored chunks
-
-```python
-import sys; sys.path.insert(0, 'rag_pipeline')
-from vector_store import VectorStore
-
-store = VectorStore(
-    path="rag_pipeline/chroma_db",
-    collection_name="vbqppl_legal_chunks",
-)
-
-# Get all chunks for a specific article
-chunks = store.get_by_article("D45AE0D8-627B-4E24-927F-F8B1E501D93E")
-for c in chunks:
-    print(f"  [{c['metadata']['unit_type']}] {c['content'][:150]}...")
-```
-
-## What a chunk looks like
-
-Each chunk produced by `chunker.py` and stored in ChromaDB has these fields:
-
-| Field | Example | Description |
-|-------|---------|-------------|
-| `chunk_id` | `017eb4cf-...` | Unique UUID |
-| `article_id` | `D45AE0D8-...` | Parent article (Điều ID) |
-| `unit_type` | `CLAUSE` | ARTICLE / CLAUSE / POINT / PARAGRAPH / SENTENCE |
-| `parent_unit_id` | `article_id/clause_1` | Parent in hierarchy |
-| `order` | `2` | Position within parent |
-| `token_count` | `87` | WordPiece tokens (real tokenizer) |
-| `hierarchy_path` | `article_id/clause_1/point_b` | Full path |
-| `content` | `"Điều: Nguyên tắc...\nViệc bầu cử..."` | Context-injected chunk text |
-| `raw_content` | `"Việc bầu cử..."` | Original text before context injection |
-| `document_id` | `85/2015/QH13` | Law number |
-| `document_type` | `Luật` | Law type |
-| `effective_date` | `01/09/2015` | When it took effect |
-| `status` | `CÓ_HIỆU_LỰC_THI_HÀNH` | Validity status |
-| `topic_id` | `3fc1ee9d-...` | Legal topic ID |
-| `topic_name` | `Tổ chức bộ máy nhà nước` | Legal topic name |
-| `chapter_title` | `Chương I NHỮNG QUY ĐỊNH CHUNG` | Chapter heading |
-| `map_code` | `35001000...` | Hierarchical navigation code |
-
-Metadata is stored separately from the embedding vector (Pipeline.md §6) and used for filtering/boosting during retrieval.
-
-## Chunking strategy
-
-Follows Pipeline.md §3–5:
-
-1. **Article fits under 512 tokens?** → Keep as one chunk (type `ARTICLE`)
-2. **Too large?** → Split into numbered **Clauses** (`1. …`, `2. …` → type `CLAUSE`)
-3. **Clause still too large?** → Split into lettered **Points** (`a) …`, `b) …` → type `POINT`)
-4. **No Clause/Point structure?** → **Late chunking**: split by paragraphs (type `PARAGRAPH`)
-5. **Paragraph too large?** → Sentence-aware split (type `SENTENCE`)
-6. **Quality**: short chunks (< 30 tokens) merged with adjacent; duplicates removed
-7. **Context**: article-level summary prepended to each chunk before embedding
-
-## Configuration
-
-All tunable parameters in `rag_pipeline/config.yaml`:
-
-| Section | Key | Default | What it controls |
-|---------|-----|---------|-----------------|
-| `chunking` | `max_tokens` | 512 | Split threshold |
-| `chunking` | `min_tokens` | 30 | Merge short chunks below this |
-| `embedding` | `model_name` | `paraphrase-multilingual-MiniLM-L12-v2` | Embedding model (384-dim, Vietnamese-compatible) |
-| `embedding` | `device` | `cpu` | `cpu` / `cuda` |
-| `vector_store` | `path` | `./chroma_db` | Where ChromaDB persists data |
-| `retrieval` | `top_k` | 10 | Max results per query |
-| `retrieval` | `similarity_threshold` | 0.3 | Minimum score cutoff |
-| `query_rewriter` | `enabled` | `true` | Expand abbreviations + add legal context |
-| `reranker` | `enabled` | `true` | MMR diversity + keyword boost reranking |
-| `context` | `enabled` | `true` | Prepend article summary to chunks |
-
-To use a Vietnamese-specific embedding model (better retrieval quality), change:
-
-```yaml
-embedding:
-  model_name: "keepitreal/vietnamese-sbert"
-```
-
-Then re-index: `python rag_pipeline/main.py -c rag_pipeline/config.yaml index`
+If your API uses a different format, adapt `embedder.py` (the `APIEmbedder.embed` method) and `context_generator.py` (the `LLMContextGenerator.generate` method) — both are isolated to response parsing in a single class.
