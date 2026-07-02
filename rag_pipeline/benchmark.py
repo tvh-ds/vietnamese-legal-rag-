@@ -25,9 +25,10 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import Config, load_config
+from context_generator import LLMContextGenerator
 from corpus_loader import load_corpus
 from chunker import Chunker, set_tokenizer_model
-from embedder import Embedder
+from embedder import Embedder, create_embedder
 from vector_store import VectorStore
 from retriever import Retriever
 from query_rewriter import QueryRewriter
@@ -127,10 +128,7 @@ class Benchmark:
         questions = self._load_questions(questions_path, max_questions)
 
         # 3. Setup retriever
-        embedder = Embedder(
-            model_name=self.config.embedding.model_name,
-            device=self.config.embedding.device,
-        )
+        embedder = create_embedder(self.config)
         rewriter = QueryRewriter(
             append_context=self.config.query_rewriter.append_context,
             expand_abbreviations=self.config.query_rewriter.expand_abbreviations,
@@ -271,7 +269,7 @@ class Benchmark:
 
         # Setup retriever WITHOUT embedder (pass a dummy — unused when query_embedding is given)
         # We pass None as embedder and rely on query_embedding param
-        embedder = Embedder(model_name=self.config.embedding.model_name, device="cpu")
+        embedder = create_embedder(self.config)
         rewriter = QueryRewriter(
             append_context=self.config.query_rewriter.append_context,
             expand_abbreviations=self.config.query_rewriter.expand_abbreviations,
@@ -356,11 +354,24 @@ class Benchmark:
         print("\n[2/4] Chunking…")
         set_tokenizer_model(self.config.embedding.model_name)
         t0 = time.perf_counter()
+
+        llm_gen = None
+        if self.config.context.use_llm:
+            llm_gen = LLMContextGenerator(
+                url=self.config.context.llm.url,
+                api_key=self.config.context.llm.api_key,
+                model=self.config.context.llm.model,
+                temperature=self.config.context.llm.temperature,
+                max_output_tokens=self.config.context.llm.max_output_tokens,
+                timeout_sec=self.config.context.llm.timeout_sec,
+            )
+
         chunker = Chunker(
             max_tokens=self.config.chunking.max_tokens,
             min_tokens=self.config.chunking.min_tokens,
             enable_context=self.config.context.enabled,
             max_context_tokens=self.config.context.max_context_tokens,
+            llm_context_generator=llm_gen,
         )
         chunks = []
         for art in articles:
@@ -370,13 +381,12 @@ class Benchmark:
 
         # 3. Embed
         print("\n[3/4] Embedding…")
-        print(f"  Model: {self.config.embedding.model_name}")
         t0 = time.perf_counter()
-        embedder = Embedder(
-            model_name=self.config.embedding.model_name,
-            device=self.config.embedding.device,
-            batch_size=self.config.embedding.batch_size,
-        )
+        embedder = create_embedder(self.config)
+        if self.config.embedding.backend == "api":
+            print(f"  Backend: API ({self.config.embedding.api.model})")
+        else:
+            print(f"  Model: {self.config.embedding.model_name}")
         embeddings = embedder.embed([ch.content for ch in chunks], show_progress=True)
         t1 = time.perf_counter()
         print(f"  {embeddings.shape[1]}-dim, {len(chunks)} vectors in {t1 - t0:.1f}s")

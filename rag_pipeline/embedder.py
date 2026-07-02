@@ -106,3 +106,106 @@ class Embedder:
     def embed_single(self, text: str) -> np.ndarray:
         """Embed a single text string. Returns 1-D array of shape (dim,)."""
         return self.embed([text])[0]
+
+
+# ---------------------------------------------------------------------------
+# API-based embedder (company embedding API)
+# ---------------------------------------------------------------------------
+
+class APIEmbedder:
+    """Embedding via company API instead of local model.
+
+    Same interface as Embedder::
+
+        embedder = APIEmbedder(url="https://...", api_key="...", model="...")
+        vectors = embedder.embed(["chunk text 1", "chunk text 2"])
+    """
+
+    def __init__(
+        self,
+        url: str,
+        api_key: str,
+        model: str = "Vietnamese_Embedding",
+        batch_size: int = 64,
+        timeout_sec: int = 60,
+    ) -> None:
+        self.url = url.rstrip("/")
+        self.api_key = api_key
+        self.model = model
+        self.batch_size = batch_size
+        self.timeout_sec = timeout_sec
+        self._dim: int | None = None
+
+    @property
+    def dim(self) -> int:
+        """Dimensionality — determined on first embed call."""
+        if self._dim is None:
+            # Embed a single short text to detect dim
+            v = self.embed(["dim probe"])  # type: ignore[assignment]
+            self._dim = int(v.shape[1])
+        return self._dim
+
+    def embed(self, texts: Sequence[str], show_progress: bool = False) -> np.ndarray:
+        """Embed texts via API, returning (len(texts), dim) float32 array."""
+        import requests
+
+        if not texts:
+            return np.empty((0, 1024), dtype=np.float32)
+
+        all_vectors: list[np.ndarray] = []
+        texts_list = list(texts)
+
+        for i in range(0, len(texts_list), self.batch_size):
+            batch = texts_list[i : i + self.batch_size]
+            resp = requests.post(
+                self.url,
+                json={
+                    "model": self.model,
+                    "input": batch,
+                },
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                timeout=self.timeout_sec,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            # Parse response format: {"data": [{"embedding": [...]}, ...]}
+            if "data" in data:
+                for item in data["data"]:
+                    all_vectors.append(np.array(item["embedding"], dtype=np.float32))
+            elif "embeddings" in data:
+                for emb in data["embeddings"]:
+                    all_vectors.append(np.array(emb, dtype=np.float32))
+            else:
+                raise ValueError(f"Unexpected API response format: {list(data.keys())}")
+
+            if show_progress and len(texts_list) > self.batch_size:
+                logger.info("APIEmbedder: %d/%d texts embedded", min(i + self.batch_size, len(texts_list)), len(texts_list))
+
+        result = np.stack(all_vectors)
+        return result.astype(np.float32)
+
+    def embed_single(self, text: str) -> np.ndarray:
+        """Embed a single text string."""
+        return self.embed([text])[0]
+
+
+def create_embedder(config) -> Embedder | APIEmbedder:
+    """Factory: return the right embedder based on config."""
+    if config.embedding.backend == "api":
+        return APIEmbedder(
+            url=config.embedding.api.url,
+            api_key=config.embedding.api.api_key,
+            model=config.embedding.api.model,
+            batch_size=config.embedding.api.batch_size,
+            timeout_sec=config.embedding.api.timeout_sec,
+        )
+    else:
+        return Embedder(
+            model_name=config.embedding.model_name,
+            device=config.embedding.device,
+            batch_size=config.embedding.batch_size,
+        )

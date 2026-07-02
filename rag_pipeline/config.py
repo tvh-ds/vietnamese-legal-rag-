@@ -1,9 +1,19 @@
 """Configuration loader for the chunking + retrieval pipeline."""
 
+import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+
+def _resolve_env(value: str) -> str:
+    """Replace ${VAR_NAME} with environment variable value."""
+    if not isinstance(value, str):
+        return value
+    pattern = re.compile(r"\$\{(\w+)\}")
+    return pattern.sub(lambda m: os.environ.get(m.group(1), ""), value)
 
 
 @dataclass
@@ -16,12 +26,26 @@ class ChunkingConfig:
 
 
 @dataclass
+class EmbeddingAPIConfig:
+    """Company embedding API parameters."""
+
+    url: str = ""
+    api_key: str = ""
+    model: str = "Vietnamese_Embedding"
+    max_seq_length: int = 2048
+    batch_size: int = 64
+    timeout_sec: int = 60
+
+
+@dataclass
 class EmbeddingConfig:
     """Embedding model parameters (Section 7 of Pipeline.md)."""
 
-    model_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-    batch_size: int = 32
+    backend: str = "local"  # "local" or "api"
+    model_name: str = "AITeamVN/Vietnamese_Embedding"
+    batch_size: int = 16
     device: str = "cpu"
+    api: EmbeddingAPIConfig = field(default_factory=EmbeddingAPIConfig)
 
 
 @dataclass
@@ -80,12 +104,25 @@ class RerankerConfig:
 
 
 @dataclass
+class LLMConfig:
+    """LLM API parameters for context generation."""
+
+    url: str = ""
+    api_key: str = ""
+    model: str = "gemma-4-31B-it"
+    temperature: float = 0.3
+    max_output_tokens: int = 120
+    timeout_sec: int = 30
+
+
+@dataclass
 class ContextConfig:
     """Context generation parameters (Section 5 of Pipeline.md)."""
 
     enabled: bool = True
     use_llm: bool = False
     max_context_tokens: int = 100
+    llm: LLMConfig = field(default_factory=LLMConfig)
 
 
 @dataclass
@@ -120,22 +157,44 @@ class Config:
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "Config":
-        """Load configuration from a YAML file.
-
-        Missing keys fall back to dataclass defaults.
-        """
+        """Load configuration from a YAML file. Missing keys fall back to defaults."""
         with open(path, "r", encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
 
+        emb_raw = raw.get("embedding", {})
+        api_raw = emb_raw.pop("api", {}) if isinstance(emb_raw, dict) else {}
+        ctx_raw = raw.get("context", {})
+        llm_raw = ctx_raw.pop("llm", {}) if isinstance(ctx_raw, dict) else {}
+
         return cls(
             chunking=ChunkingConfig(**raw.get("chunking", {})),
-            embedding=EmbeddingConfig(**raw.get("embedding", {})),
+            embedding=EmbeddingConfig(
+                **emb_raw,
+                api=EmbeddingAPIConfig(
+                    url=_resolve_env(api_raw.get("url", "")),
+                    api_key=_resolve_env(api_raw.get("api_key", "")),
+                    model=api_raw.get("model", "Vietnamese_Embedding"),
+                    max_seq_length=api_raw.get("max_seq_length", 2048),
+                    batch_size=api_raw.get("batch_size", 64),
+                    timeout_sec=api_raw.get("timeout_sec", 60),
+                ),
+            ),
             vector_store=VectorStoreConfig(**raw.get("vector_store", {})),
             query_rewriter=QueryRewriterConfig(**raw.get("query_rewriter", {})),
             bm25=BM25Config(**raw.get("bm25", {})),
             retrieval=RetrievalConfig(**raw.get("retrieval", {})),
             reranker=RerankerConfig(**raw.get("reranker", {})),
-            context=ContextConfig(**raw.get("context", {})),
+            context=ContextConfig(
+                **ctx_raw,
+                llm=LLMConfig(
+                    url=_resolve_env(llm_raw.get("url", "")),
+                    api_key=_resolve_env(llm_raw.get("api_key", "")),
+                    model=llm_raw.get("model", "gemma-4-31B-it"),
+                    temperature=llm_raw.get("temperature", 0.3),
+                    max_output_tokens=llm_raw.get("max_output_tokens", 120),
+                    timeout_sec=llm_raw.get("timeout_sec", 30),
+                ),
+            ),
             data=DataConfig(**raw.get("data", {})),
             metadata=MetadataConfig(**raw.get("metadata", {})),
         )
@@ -145,7 +204,6 @@ def load_config(path: str | Path = "config.yaml") -> Config:
     """Convenience loader. Resolves the path against cwd."""
     config_path = Path(path)
     if not config_path.is_absolute():
-        # Try relative to the rag_pipeline package directory
         package_dir = Path(__file__).parent
         candidate = package_dir / config_path
         if candidate.exists():

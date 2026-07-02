@@ -16,9 +16,10 @@ from pathlib import Path
 
 from bm25_retriever import BM25Retriever
 from config import Config, load_config
+from context_generator import LLMContextGenerator
 from data_loader import Article, load_articles
 from chunker import Chunk, Chunker, chunk_articles, set_tokenizer_model
-from embedder import Embedder
+from embedder import Embedder, create_embedder
 from query_rewriter import QueryRewriter
 from reranker import Reranker
 from retriever import Retriever
@@ -56,15 +57,28 @@ def cmd_index(config: Config) -> None:
 
     # 2. Chunk
     print("\n[2/5] Chunking articles…")
-    # Match tokenizer to embedding model for accurate token counts
     set_tokenizer_model(config.embedding.model_name)
     t0 = time.perf_counter()
+
+    # LLM context generator (optional)
+    llm_gen = None
+    if config.context.use_llm:
+        llm_gen = LLMContextGenerator(
+            url=config.context.llm.url,
+            api_key=config.context.llm.api_key,
+            model=config.context.llm.model,
+            temperature=config.context.llm.temperature,
+            max_output_tokens=config.context.llm.max_output_tokens,
+            timeout_sec=config.context.llm.timeout_sec,
+        )
+
     chunker = Chunker(
         max_tokens=config.chunking.max_tokens,
         min_tokens=config.chunking.min_tokens,
         overlap_tokens=config.chunking.overlap_tokens,
         enable_context=config.context.enabled,
         max_context_tokens=config.context.max_context_tokens,
+        llm_context_generator=llm_gen,
     )
     chunks = chunk_articles(
         articles,
@@ -72,19 +86,19 @@ def cmd_index(config: Config) -> None:
         min_tokens=config.chunking.min_tokens,
         enable_context=config.context.enabled,
         max_context_tokens=config.context.max_context_tokens,
+        llm_context_generator=llm_gen,
     )
     t1 = time.perf_counter()
     print(f"  Produced {len(chunks)} chunks in {t1 - t0:.1f}s")
 
     # 3. Embed
     print("\n[3/5] Generating embeddings…")
-    print(f"  Model: {config.embedding.model_name}")
     t0 = time.perf_counter()
-    embedder = Embedder(
-        model_name=config.embedding.model_name,
-        device=config.embedding.device,
-        batch_size=config.embedding.batch_size,
-    )
+    embedder = create_embedder(config)
+    if config.embedding.backend == "api":
+        print(f"  Backend: API ({config.embedding.api.model})")
+    else:
+        print(f"  Model: {config.embedding.model_name}")
     texts = [ch.content for ch in chunks]
     embeddings = embedder.embed(texts, show_progress=True)
     t1 = time.perf_counter()
@@ -140,10 +154,7 @@ def cmd_search(
     print(f"Loading articles…", file=sys.stderr)
     articles = load_articles(config.data.path)
 
-    embedder = Embedder(
-        model_name=config.embedding.model_name,
-        device=config.embedding.device,
-    )
+    embedder = create_embedder(config)
     store = VectorStore(
         path=config.vector_store.path,
         collection_name=config.vector_store.collection_name,

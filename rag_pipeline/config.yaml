@@ -21,20 +21,28 @@ chunking:
 # Embedding model (Section 7 of Pipeline.md)
 # ---------------------------------------------------------------------------
 embedding:
-  # sentence-transformers model name
-  # AITeamVN/Vietnamese_Embedding: 1024-dim, 2048-token context, BGE-M3 backbone
-  #   Zalo Legal benchmark: Acc@1=0.727, MRR@10=0.818
-  # Alternatives:
-  #   "tutran27/vietnamese-legal-phapdien-embedding-v1" — 1024-dim, 768-token, legal-only
-  #   "BAAI/bge-m3" — 1024-dim, 8194-token, multilingual (no VI fine-tune)
-  #   "keepitreal/vietnamese-sbert" — 768-dim, 256-token, PhoBERT (too short)
+  # Backend: "local" (sentence-transformers) or "api" (company embedding API)
+  backend: "api"
+  
+  # Local backend settings (used when backend: "local")
   model_name: "AITeamVN/Vietnamese_Embedding"
-  
-  # Batch size for embedding generation (lower for 1024-dim models on CPU)
   batch_size: 16
-  
-  # Device: "cpu", "cuda", or "auto" (auto-detects GPU)
   device: "cpu"
+  
+  # API backend settings (used when backend: "api")
+  api:
+    # Base URL for the embedding API
+    url: "https://your-company.com/v1/embeddings"
+    # API key (read from env var EMBEDDING_API_KEY)
+    api_key: "${EMBEDDING_API_KEY}"
+    # Model name to pass to the API
+    model: "Vietnamese_Embedding"
+    # Max tokens per input (API model supports 2048)
+    max_seq_length: 2048
+    # Batch size for API calls
+    batch_size: 64
+    # Request timeout in seconds
+    timeout_sec: 60
 
 # ---------------------------------------------------------------------------
 # Vector database (Section 8 of Pipeline.md)
@@ -133,10 +141,25 @@ context:
   enabled: true
   
   # Use LLM for context generation (true) or heuristic fallback (false)
-  use_llm: false
+  use_llm: true
   
   # Target context length in tokens (60-120 recommended)
   max_context_tokens: 100
+  
+  # LLM API settings (used when use_llm: true)
+  llm:
+    # Base URL for the chat completions API
+    url: "https://your-company.com/v1/chat/completions"
+    # API key (read from env var LLM_API_KEY)
+    api_key: "${LLM_API_KEY}"
+    # Model name
+    model: "gemma-4-31B-it"
+    # Sampling temperature
+    temperature: 0.3
+    # Max output tokens for the summary
+    max_output_tokens: 120
+    # Request timeout in seconds
+    timeout_sec: 30
 
 # ---------------------------------------------------------------------------
 # Data source

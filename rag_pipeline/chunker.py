@@ -152,6 +152,7 @@ class Chunker:
     enable_context: bool = True
     max_context_tokens: int = 100
     token_counter: Callable[[str], int] = estimate_tokens
+    llm_context_generator: object | None = None  # LLMContextGenerator instance
 
     # -- public API ----------------------------------------------------------
 
@@ -386,24 +387,25 @@ class Chunker:
     def _generate_context(self, article: Article) -> str:
         """Generate a short semantic context for the article.
 
-        Uses a heuristic: combines article title + first sentence.
-        When `use_llm` is enabled (future), this would call an LLM.
+        Uses LLM via API when configured, falls back to heuristic
+        (title + first sentence) otherwise.
         """
-        # Extract first sentence from content
+        # Try LLM first
+        if self.llm_context_generator is not None:
+            llm_summary = self.llm_context_generator.generate(
+                title=article.title,
+                content=article.content,
+            )
+            if llm_summary:
+                return self._truncate_context(llm_summary)
+
+        # Heuristic fallback
         content = article.content.strip()
         first_sent = content.split(".")[0].strip() if content else ""
-
-        # Build context from title + first sentence
-        # Strip the "Điều X.Y..." prefix for a cleaner summary
         title_clean = article.title.split(". ", 1)[-1] if ". " in article.title else article.title
-        context = f"Điều: {title_clean}"
-
+        combined = f"Điều: {title_clean}"
         if first_sent and first_sent != title_clean:
-            combined = f"{context}. {first_sent}"
-        else:
-            combined = context
-
-        # Truncate to target length
+            combined = f"{combined}. {first_sent}"
         return self._truncate_context(combined)
 
     def _truncate_context(self, text: str) -> str:
@@ -480,6 +482,7 @@ def chunk_articles(
     min_tokens: int = 30,
     enable_context: bool = True,
     max_context_tokens: int = 100,
+    llm_context_generator: object | None = None,
 ) -> list[Chunk]:
     """Convenience: chunk a list of articles with default settings."""
     chunker = Chunker(
@@ -487,6 +490,7 @@ def chunk_articles(
         min_tokens=min_tokens,
         enable_context=enable_context,
         max_context_tokens=max_context_tokens,
+        llm_context_generator=llm_context_generator,
     )
     all_chunks: list[Chunk] = []
     for article in articles:
