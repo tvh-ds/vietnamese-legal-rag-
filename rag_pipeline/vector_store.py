@@ -217,4 +217,5 @@ class VectorStore:
             "topic_name": chunk.topic_name,
             "chapter_title": chunk.chapter_title,
             "map_code": chunk.map_code,
+            "benchmark_id": getattr(chunk, "benchmark_id", ""),
         }

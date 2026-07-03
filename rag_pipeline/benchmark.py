@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Recall@10 benchmark for the Vietnamese Legal RAG pipeline.
+"""Recall@10 benchmark using the data/ pipeline.
 
-Indexes the VLQA legal corpus through the chunking pipeline, then evaluates
-retrieval quality on the benchmark question set.
+Indexes articles from data/ (with benchmark IDs from Correct ID.json),
+then evaluates retrieval quality against the question set.
 
 Usage:
     python benchmark.py \\
-        --corpus "D:/intern/Test/vlqa/legal_corpus.json" \\
-        --questions "D:/intern/Test/vlqa/1238_question_map_phap_dien.json" \\
-        --config rag_pipeline/config.yaml
+        --config rag_pipeline/config.yaml \\
+        --questions 1238_question_map_phap_dien.json \\
+        --id-map "Correct ID.json" \\
+        -n 50
 """
 
 from __future__ import annotations
@@ -21,14 +22,13 @@ import time
 from pathlib import Path
 from typing import Optional
 
-# Ensure rag_pipeline is on path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import Config, load_config
 from context_generator import LLMContextGenerator
-from corpus_loader import load_corpus
+from data_loader import load_articles
 from chunker import Chunker, set_tokenizer_model
-from embedder import Embedder, create_embedder
+from embedder import create_embedder
 from vector_store import VectorStore
 from retriever import Retriever
 from query_rewriter import QueryRewriter
@@ -39,96 +39,35 @@ logger = logging.getLogger("benchmark")
 
 
 # ---------------------------------------------------------------------------
-# Benchmark runner
+# Benchmark
 # ---------------------------------------------------------------------------
 
 class Benchmark:
-    """Recall@10 benchmark for legal retrieval."""
+    """Recall@10 benchmark — indexes data/ then evaluates retrieval."""
 
     def __init__(self, config: Config) -> None:
         self.config = config
 
     def run(
         self,
-        corpus_path: str,
         questions_path: str,
+        id_map_path: str,
         max_questions: Optional[int] = None,
     ) -> dict:
-        """Run the full benchmark: index → evaluate."""
-        store, bm25, articles = self._index_corpus(corpus_path)
-        return self._evaluate(store, bm25, articles, questions_path, max_questions)
-
-    def evaluate_prebuilt(
-        self,
-        questions_path: str,
-        max_questions: Optional[int] = None,
-    ) -> dict:
-        """Evaluate using pre-built vector store (skip indexing)."""
-        import json as _json
-
-        store = VectorStore(
-            path=self.config.vector_store.path + "_benchmark",
-            collection_name="benchmark_corpus",
-        )
-        if store.count() == 0:
-            raise RuntimeError("Store is empty. Run 'split_workflow.py store' first.")
-
-        # Load articles for retriever (needed for graph expansion, minimal here)
-        articles = []
-
-        # Try loading BM25 if available
-        bm25 = None
-        if self.config.bm25.enabled:
-            bm25 = BM25Retriever.load(self.config.bm25.index_path + "_benchmark")
-        # If BM25 not prebuilt, build it from store contents
-        if bm25 is None and self.config.bm25.enabled:
-            logger.info("Building BM25 from prebuilt store…")
-            bm25 = BM25Retriever(
-                k1=self.config.bm25.k1, b=self.config.bm25.b,
-                top_k=self.config.bm25.top_k,
-            )
-            # Extract chunks from store for BM25 (paginated to avoid SQL limits)
-            from pipeline_types import RetrievalResult
-            bm25_chunks = []
-            page_size = 5000
-            offset = 0
-            total = store.count()
-            while offset < total:
-                batch = store.collection.get(
-                    include=["documents", "metadatas"],
-                    limit=page_size,
-                    offset=offset,
-                )
-                if not batch["ids"]:
-                    break
-                for i, cid in enumerate(batch["ids"]):
-                    bm25_chunks.append(RetrievalResult(
-                        chunk_id=cid,
-                        content=batch["documents"][i],
-                        raw_content="",
-                        article_id=batch["metadatas"][i].get("article_id", ""),
-                        unit_type=batch["metadatas"][i].get("unit_type", "ARTICLE"),
-                        order=0, hierarchy_path="", score=0.0, source="", metadata={},
-                    ))
-                offset += page_size
-                logger.info("BM25 build: loaded %d/%d chunks", min(offset, total), total)
-            bm25.build_index(bm25_chunks)
-
-        return self._evaluate(store, bm25, articles, questions_path, max_questions)
-
-    def _evaluate(
-        self, store, bm25, articles, questions_path, max_questions
-    ) -> dict:
-        """Shared evaluation logic."""
+        """Index articles → evaluate retrieval."""
         print("=" * 60)
         print("VLQA Legal RAG — Recall@10 Benchmark")
         print("=" * 60)
 
-        # 1. Load questions
+        # 1. Index
+        store, bm25, articles = self._index(id_map_path)
+
+        # 2. Load questions
         questions = self._load_questions(questions_path, max_questions)
 
         # 3. Setup retriever
         embedder = create_embedder(self.config)
+
         rewriter = QueryRewriter(
             append_context=self.config.query_rewriter.append_context,
             expand_abbreviations=self.config.query_rewriter.expand_abbreviations,
@@ -148,7 +87,7 @@ class Benchmark:
             top_k=self.config.retrieval.top_k,
             similarity_threshold=self.config.retrieval.similarity_threshold,
             enable_metadata_filtering=self.config.retrieval.enable_metadata_filtering,
-            enable_graph_expansion=False,  # graph expansion not applicable for corpus
+            enable_graph_expansion=False,
             vector_weight=self.config.retrieval.vector_weight,
             metadata_boost=self.config.retrieval.metadata_boost,
             graph_boost=0.0,
@@ -166,17 +105,18 @@ class Benchmark:
 
         for i, q in enumerate(questions):
             query_text = q["question"]
-            relevant = set(str(law_id) for law_id in q["relevant_laws"])
+            relevant = set(str(lid) for lid in q["relevant_laws"])
 
-            # Rewrite query
             if rewriter is not None:
                 query_text = rewriter.rewrite(query_text)
 
-            # Retrieve
             results = retriever.retrieve(query_text, top_k=10)
-            retrieved_ids = {r.article_id for r in results}
 
-            # Check hit
+            # Match by benchmark_id (metadata only — never embedded)
+            retrieved_ids = {
+                r.metadata.get("benchmark_id", "")
+                for r in results
+            }
             overlap = retrieved_ids & relevant
             hit = len(overlap) > 0
             if hit:
@@ -192,8 +132,7 @@ class Benchmark:
             })
 
             if (i + 1) % 100 == 0:
-                current_recall = hits / (i + 1)
-                print(f"  [{i + 1}/{len(questions)}] Recall@10: {current_recall:.4f}")
+                print(f"  [{i + 1}/{len(questions)}] Recall@10: {hits / (i + 1):.4f}")
 
         recall = hits / len(questions) if questions else 0.0
         print(f"\n{'=' * 40}")
@@ -207,148 +146,21 @@ class Benchmark:
             "per_question": per_question,
         }
 
-    def evaluate_with_query_embeddings(
-        self,
-        questions_path: str,
-        query_embeddings_path: str,
-        max_questions: Optional[int] = None,
-    ) -> dict:
-        """Evaluate using pre-computed query embeddings (GPU-offloaded).
-
-        Same full pipeline as evaluate_prebuilt — ChromaDB + BM25 + reranker —
-        but reads query vectors from a .npy file instead of loading the model.
-
-        Args:
-            questions_path: Path to benchmark questions JSON.
-            query_embeddings_path: Path to .npy file with shape (N, dim).
-            max_questions: Limit number of questions.
-        """
-        import numpy as np
-
-        # Load query embeddings
-        query_embeddings = np.load(query_embeddings_path)
-        print(f"Loaded query embeddings: shape={query_embeddings.shape}")
-
-        # Load store + BM25 (same as evaluate_prebuilt)
-        store = VectorStore(
-            path=self.config.vector_store.path + "_benchmark",
-            collection_name="benchmark_corpus",
-        )
-        if store.count() == 0:
-            raise RuntimeError("Store is empty. Run 'split_workflow.py store' first.")
-
-        articles = []
-        bm25 = None
-        if self.config.bm25.enabled:
-            bm25 = BM25Retriever.load(self.config.bm25.index_path + "_benchmark")
-        if bm25 is None and self.config.bm25.enabled:
-            logger.info("Building BM25 from prebuilt store…")
-            bm25 = BM25Retriever(
-                k1=self.config.bm25.k1, b=self.config.bm25.b,
-                top_k=self.config.bm25.top_k,
-            )
-            from pipeline_types import RetrievalResult
-            bm25_chunks = []
-            page_size, offset, total = 5000, 0, store.count()
-            while offset < total:
-                batch = store.collection.get(include=["documents", "metadatas"], limit=page_size, offset=offset)
-                if not batch["ids"]: break
-                for j, cid in enumerate(batch["ids"]):
-                    bm25_chunks.append(RetrievalResult(
-                        chunk_id=cid, content=batch["documents"][j], raw_content="",
-                        article_id=batch["metadatas"][j].get("article_id", ""),
-                        unit_type=batch["metadatas"][j].get("unit_type", "ARTICLE"),
-                        order=0, hierarchy_path="", score=0.0, source="", metadata={},
-                    ))
-                offset += page_size
-            bm25.build_index(bm25_chunks)
-
-        # Load questions
-        questions = self._load_questions(questions_path, max_questions)
-        n = min(len(questions), query_embeddings.shape[0])
-
-        # Setup retriever WITHOUT embedder (pass a dummy — unused when query_embedding is given)
-        # We pass None as embedder and rely on query_embedding param
-        embedder = create_embedder(self.config)
-        rewriter = QueryRewriter(
-            append_context=self.config.query_rewriter.append_context,
-            expand_abbreviations=self.config.query_rewriter.expand_abbreviations,
-            context_phrase=self.config.query_rewriter.context_phrase,
-        ) if self.config.query_rewriter.enabled else None
-        reranker = Reranker(
-            lambda_mmr=self.config.reranker.lambda_mmr,
-            keyword_boost=self.config.reranker.keyword_boost,
-            diversity_weight=self.config.reranker.diversity_weight,
-        ) if self.config.reranker.enabled else None
-
-        retriever = Retriever(
-            embedder=embedder, vector_store=store, articles=articles,
-            top_k=self.config.retrieval.top_k,
-            similarity_threshold=self.config.retrieval.similarity_threshold,
-            enable_metadata_filtering=self.config.retrieval.enable_metadata_filtering,
-            enable_graph_expansion=False,
-            vector_weight=self.config.retrieval.vector_weight,
-            metadata_boost=self.config.retrieval.metadata_boost,
-            graph_boost=0.0,
-            prefer_active=self.config.metadata.prefer_active,
-            topic_boost=self.config.metadata.topic_boost,
-            reranker=reranker, bm25_retriever=bm25,
-            bm25_weight=self.config.bm25.fusion_weight,
-        )
-
-        # Evaluate
-        print(f"\nEvaluating {n} questions (Recall@10)…")
-        hits = 0
-        per_question: list[dict] = []
-
-        for i in range(n):
-            q = questions[i]
-            query_text = q["question"]
-            relevant = set(str(law_id) for law_id in q["relevant_laws"])
-
-            if rewriter is not None:
-                query_text = rewriter.rewrite(query_text)
-
-            # Pre-computed embedding bypasses embedder
-            results = retriever.retrieve(
-                query_text, top_k=10,
-                query_embedding=query_embeddings[i],
-            )
-            retrieved_ids = {r.article_id for r in results}
-            overlap = retrieved_ids & relevant
-            hit = len(overlap) > 0
-            if hit: hits += 1
-
-            per_question.append({
-                "qid": q["qid"], "question": q["question"][:100],
-                "relevant_count": len(relevant), "retrieved_count": len(results),
-                "hit": hit, "overlap": list(overlap)[:5],
-            })
-
-            if (i + 1) % 100 == 0:
-                print(f"  [{i + 1}/{n}] Recall@10: {hits / (i + 1):.4f}")
-
-        recall = hits / n if n else 0.0
-        print(f"\n{'=' * 40}")
-        print(f"Recall@10: {recall:.4f}  ({hits}/{n})")
-        print(f"{'=' * 40}")
-
-        return {
-            "recall_at_10": recall, "total_questions": n,
-            "hits": hits, "per_question": per_question,
-        }
-
     # -- indexing ------------------------------------------------------------
 
-    def _index_corpus(self, corpus_path: str) -> tuple[VectorStore, Optional[BM25Retriever], list]:
-        """Index the VLQA corpus through the pipeline."""
+    def _index(self, id_map_path: str):
+        """Index data/ articles through the full pipeline."""
 
-        # 1. Load
-        print("\n[1/4] Loading corpus…")
+        # 1. Load with benchmark IDs
+        print("\n[1/4] Loading articles…")
         t0 = time.perf_counter()
-        articles = load_corpus(corpus_path)
+        articles = load_articles(
+            self.config.data.path,
+            id_map_path=id_map_path,
+        )
         t1 = time.perf_counter()
-        print(f"  Loaded {len(articles)} articles in {t1 - t0:.1f}s")
+        matched = sum(1 for a in articles if a.benchmark_id)
+        print(f"  Loaded {len(articles)} articles ({matched} with benchmark IDs) in {t1 - t0:.1f}s")
 
         # 2. Chunk
         print("\n[2/4] Chunking…")
@@ -395,15 +207,15 @@ class Benchmark:
         print("\n[4/4] Storing…")
         t0 = time.perf_counter()
         store = VectorStore(
-            path=f"{self.config.vector_store.path}_benchmark",
-            collection_name="benchmark_corpus",
+            path=f"{self.config.vector_store.path}_bench",
+            collection_name="bench_data",
         )
         store.clear()
         store.upsert(chunks, embeddings)
         t1 = time.perf_counter()
         print(f"  Stored {store.count()} chunks in {t1 - t0:.1f}s")
 
-        # Build BM25 index
+        # Build BM25
         bm25 = None
         if self.config.bm25.enabled:
             bm25 = BM25Retriever(
@@ -433,35 +245,15 @@ class Benchmark:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Recall@10 benchmark for Vietnamese Legal RAG",
+        description="Recall@10 benchmark using data/ pipeline",
     )
-    parser.add_argument(
-        "--corpus",
-        required=True,
-        help="Path to legal_corpus.json",
-    )
-    parser.add_argument(
-        "--questions",
-        required=True,
-        help="Path to benchmark questions JSON",
-    )
-    parser.add_argument(
-        "--config",
-        default="config.yaml",
-        help="Path to config.yaml",
-    )
-    parser.add_argument(
-        "-n", "--max-questions",
-        type=int,
-        default=None,
-        help="Limit number of questions (for quick tests)",
-    )
+    parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
+    parser.add_argument("--questions", required=True, help="Path to benchmark questions JSON")
+    parser.add_argument("--id-map", required=True, help="Path to Correct ID.json")
+    parser.add_argument("-n", "--max-questions", type=int, default=None)
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.WARNING,
-        format="%(levelname)s: %(message)s",
-    )
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 
     config_path = Path(args.config)
     if not config_path.is_absolute():
@@ -469,21 +261,24 @@ def main() -> None:
         candidate = package_dir / config_path
         if candidate.exists():
             config_path = candidate
-
     config = load_config(str(config_path))
+
+    # Resolve paths relative to config
+    config_dir = config_path.parent
+    if not Path(config.data.path).is_absolute():
+        config.data.path = str(config_dir / config.data.path)
 
     benchmark = Benchmark(config)
     result = benchmark.run(
-        corpus_path=args.corpus,
         questions_path=args.questions,
+        id_map_path=args.id_map,
         max_questions=args.max_questions,
     )
 
-    # Save detailed results
     out_path = Path("benchmark_results.json")
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
-    print(f"\nDetailed results saved to {out_path}")
+    print(f"\nSaved {out_path}")
 
 
 if __name__ == "__main__":

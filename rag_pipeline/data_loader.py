@@ -51,6 +51,9 @@ class Article:
     appendix: list = field(default_factory=list)            # Phụ lục
     source_file: str = ""                                   # Originating JSON file
 
+    # Benchmark ID (from content-matched Correct ID.json — stored as metadata, never embedded)
+    benchmark_id: str = ""
+
 
 # ---------------------------------------------------------------------------
 # Document ID normalization patterns
@@ -121,17 +124,31 @@ def _extract_source_link(metadata_list: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def load_articles(data_dir: str | Path = "data") -> list[Article]:
+def load_articles(
+    data_dir: str | Path = "data",
+    id_map_path: str | Path | None = None,
+) -> list[Article]:
     """Load all JSON files from *data_dir* and return a flat list of Articles.
 
     Each JSON file contains a root array of topic entries. Each topic entry
     contains chapters, and each chapter contains articles (Điều).
+
+    If *id_map_path* is provided, loads a content→benchmark_id mapping
+    (Correct ID.json format) and attaches benchmark IDs to articles via
+    exact content matching.
     """
     data_path = Path(data_dir)
     if not data_path.exists():
         raise FileNotFoundError(f"Data directory not found: {data_path}")
 
+    # Load benchmark ID mapping (content → numeric_id)
+    id_map: dict[str, int] = {}
+    if id_map_path is not None:
+        with open(id_map_path, "r", encoding="utf-8") as f:
+            id_map = json.load(f)
+
     articles: list[Article] = []
+    matched: int = 0
     json_files = sorted(data_path.glob("*.json"))
 
     for json_file in json_files:
@@ -181,6 +198,14 @@ def load_articles(data_dir: str | Path = "data") -> list[Article]:
                 status = _extract_status(metadata_list)
                 source_link = _extract_source_link(metadata_list)
 
+                # Benchmark ID — content-based matching
+                benchmark_id = ""
+                if id_map:
+                    bid = id_map.get(content.strip())
+                    if bid is not None:
+                        benchmark_id = str(bid)
+                        matched += 1
+
                 articles.append(Article(
                     article_id=article_id,
                     map_code=map_code,
@@ -202,8 +227,14 @@ def load_articles(data_dir: str | Path = "data") -> list[Article]:
                     references=references,
                     appendix=appendix,
                     source_file=json_file.name,
+                    benchmark_id=benchmark_id,
                 ))
 
+    if id_map:
+        import logging
+        logging.getLogger(__name__).info(
+            "Benchmark ID matches: %d/%d articles", matched, len(articles),
+        )
     return articles
 
 

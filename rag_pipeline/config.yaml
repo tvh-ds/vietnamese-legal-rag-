@@ -166,7 +166,7 @@ context:
 # ---------------------------------------------------------------------------
 data:
   # Directory containing parsed JSON files (relative to this config file)
-  path: "../data"
+  path: "../data/phap_dien_dataset_45_chu_de"
 
 # ---------------------------------------------------------------------------
 # Metadata filtering preferences

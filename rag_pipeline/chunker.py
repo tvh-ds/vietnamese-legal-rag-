@@ -120,6 +120,9 @@ class Chunk:
     chapter_title: str = ""
     map_code: str = ""
 
+    # Benchmark ID (content-matched — stored as metadata, never embedded)
+    benchmark_id: str = ""
+
 
 # ---------------------------------------------------------------------------
 # Regex patterns for structure detection
@@ -457,6 +460,7 @@ class Chunker:
             topic_name=article.topic_name,
             chapter_title=article.chapter_title,
             map_code=article.map_code,
+            benchmark_id=getattr(article, "benchmark_id", ""),
         )
 
     @staticmethod

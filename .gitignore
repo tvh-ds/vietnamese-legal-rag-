@@ -14,7 +14,9 @@ env/
 chroma_db/
 rag_pipeline/chroma_db/
 
-# Large corpus files (>100MB — keep locally)
+# Large benchmark files (>30MB — keep locally)
+Correct ID.json
+1238_question_map_phap_dien.json
 corpus/
 
 # Temp export files
