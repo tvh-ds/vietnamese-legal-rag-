@@ -165,7 +165,7 @@ class Config:
         # Shared API config (base_url + api_key)
         shared_api = raw.get("api", {})
         base_url = shared_api.get("base_url", "").rstrip("/")
-        api_key = shared_api.get("api_key", "")
+        api_key = _resolve_env(shared_api.get("api_key", ""))
 
         # Attach shared API credentials to the config
         result = cls(

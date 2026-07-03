@@ -23,7 +23,7 @@ chunking:
 api:
   # OpenAI-compatible base URL (shared by embedding + LLM)
   base_url: "https://mkp-api.fptcloud.com"
-  # API key
+  # API key (set env var FPT_API_KEY, or put key here for local dev)
   api_key: "${FPT_API_KEY}"
 
 embedding:
