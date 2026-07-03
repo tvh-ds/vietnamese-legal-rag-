@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config import Config, load_config
 from context_generator import LLMContextGenerator
 from data_loader import load_articles
-from chunker import Chunker, set_tokenizer_model
+from chunker import chunk_articles, set_tokenizer_model
 from embedder import create_embedder
 from vector_store import VectorStore
 from retriever import Retriever
@@ -53,14 +53,15 @@ class Benchmark:
         questions_path: str,
         id_map_path: str,
         max_questions: Optional[int] = None,
+        force_rechunk: bool = False,
     ) -> dict:
         """Index articles → evaluate retrieval."""
         print("=" * 60)
         print("VLQA Legal RAG — Recall@10 Benchmark")
         print("=" * 60)
 
-        # 1. Index
-        store, bm25, articles = self._index(id_map_path)
+        # 1. Index (skips if store exists and not rechunking)
+        store, bm25, articles = self._index(id_map_path, force_rechunk)
 
         # 2. Load questions
         questions = self._load_questions(questions_path, max_questions)
@@ -148,8 +149,26 @@ class Benchmark:
 
     # -- indexing ------------------------------------------------------------
 
-    def _index(self, id_map_path: str):
-        """Index data/ articles through the full pipeline."""
+    def _index(self, id_map_path: str, force_rechunk: bool = False):
+        """Index data/ articles through the full pipeline.
+
+        If ChromaDB already has data and force_rechunk is False, skips
+        chunking + embedding + storing entirely. Only reloads articles
+        for the retriever.
+        """
+        store_path = f"{self.config.vector_store.path}_bench"
+        store = VectorStore(path=store_path, collection_name="bench_data")
+
+        if store.count() > 0 and not force_rechunk:
+            print("\n[skip] Store already has data — reusing existing index")
+            print(f"  {store.count()} chunks in {store_path}")
+            articles = load_articles(
+                self.config.data.path, id_map_path=id_map_path,
+            )
+            bm25 = None
+            if self.config.bm25.enabled:
+                bm25 = BM25Retriever.load(store_path + "/bm25_index.pkl")
+            return store, bm25, articles
 
         # 1. Load with benchmark IDs
         print("\n[1/4] Loading articles…")
@@ -170,24 +189,23 @@ class Benchmark:
         llm_gen = None
         if self.config.context.use_llm:
             llm_gen = LLMContextGenerator(
-                url=self.config.context.llm.url,
-                api_key=self.config.context.llm.api_key,
+                base_url=getattr(self.config, "_api_base_url", ""),
+                api_key=getattr(self.config, "_api_key", ""),
                 model=self.config.context.llm.model,
                 temperature=self.config.context.llm.temperature,
                 max_output_tokens=self.config.context.llm.max_output_tokens,
                 timeout_sec=self.config.context.llm.timeout_sec,
             )
 
-        chunker = Chunker(
+        chunks = chunk_articles(
+            articles,
             max_tokens=self.config.chunking.max_tokens,
             min_tokens=self.config.chunking.min_tokens,
             enable_context=self.config.context.enabled,
             max_context_tokens=self.config.context.max_context_tokens,
             llm_context_generator=llm_gen,
+            force_rechunk=force_rechunk,
         )
-        chunks = []
-        for art in articles:
-            chunks.extend(chunker.chunk_article(art))
         t1 = time.perf_counter()
         print(f"  Produced {len(chunks)} chunks in {t1 - t0:.1f}s")
 
@@ -206,10 +224,6 @@ class Benchmark:
         # 4. Store
         print("\n[4/4] Storing…")
         t0 = time.perf_counter()
-        store = VectorStore(
-            path=f"{self.config.vector_store.path}_bench",
-            collection_name="bench_data",
-        )
         store.clear()
         store.upsert(chunks, embeddings)
         t1 = time.perf_counter()
@@ -224,6 +238,7 @@ class Benchmark:
                 top_k=self.config.bm25.top_k,
             )
             bm25.build_index(chunks)  # type: ignore[arg-type]
+            bm25.save(store_path + "/bm25_index.pkl")
 
         print()
         return store, bm25, articles
@@ -251,6 +266,7 @@ def main() -> None:
     parser.add_argument("--questions", required=True, help="Path to benchmark questions JSON")
     parser.add_argument("--id-map", required=True, help="Path to Correct ID.json")
     parser.add_argument("-n", "--max-questions", type=int, default=None)
+    parser.add_argument("--rechunk", action="store_true", help="Force re-chunking (ignore cache)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
@@ -273,6 +289,7 @@ def main() -> None:
         questions_path=args.questions,
         id_map_path=args.id_map,
         max_questions=args.max_questions,
+        force_rechunk=args.rechunk,
     )
 
     out_path = Path("benchmark_results.json")

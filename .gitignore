@@ -20,9 +20,11 @@ Correct ID.json
 corpus/
 
 # Temp export files
-*.pkl
 *.npy
 benchmark_results.json
+
+# Cached chunks (rebuild with --rechunk)
+chunks_cache.pkl
 
 # IDE / editor
 .vscode/

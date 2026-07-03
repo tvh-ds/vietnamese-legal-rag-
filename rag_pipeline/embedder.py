@@ -113,42 +113,39 @@ class Embedder:
 # ---------------------------------------------------------------------------
 
 class APIEmbedder:
-    """Embedding via company API instead of local model.
+    """Embedding via OpenAI-compatible company API.
 
     Same interface as Embedder::
 
-        embedder = APIEmbedder(url="https://...", api_key="...", model="...")
+        embedder = APIEmbedder(base_url="https://...", api_key="...", model="...")
         vectors = embedder.embed(["chunk text 1", "chunk text 2"])
     """
 
     def __init__(
         self,
-        url: str,
+        base_url: str,
         api_key: str,
         model: str = "Vietnamese_Embedding",
         batch_size: int = 64,
         timeout_sec: int = 60,
     ) -> None:
-        self.url = url.rstrip("/")
-        self.api_key = api_key
+        from openai import OpenAI
+
         self.model = model
         self.batch_size = batch_size
-        self.timeout_sec = timeout_sec
         self._dim: int | None = None
+        self._client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout_sec)
 
     @property
     def dim(self) -> int:
         """Dimensionality — determined on first embed call."""
         if self._dim is None:
-            # Embed a single short text to detect dim
             v = self.embed(["dim probe"])  # type: ignore[assignment]
             self._dim = int(v.shape[1])
         return self._dim
 
     def embed(self, texts: Sequence[str], show_progress: bool = False) -> np.ndarray:
         """Embed texts via API, returning (len(texts), dim) float32 array."""
-        import requests
-
         if not texts:
             return np.empty((0, 1024), dtype=np.float32)
 
@@ -157,33 +154,16 @@ class APIEmbedder:
 
         for i in range(0, len(texts_list), self.batch_size):
             batch = texts_list[i : i + self.batch_size]
-            resp = requests.post(
-                self.url,
-                json={
-                    "model": self.model,
-                    "input": batch,
-                },
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                timeout=self.timeout_sec,
+            resp = self._client.embeddings.create(
+                model=self.model,
+                input=batch,
             )
-            resp.raise_for_status()
-            data = resp.json()
-
-            # Parse response format: {"data": [{"embedding": [...]}, ...]}
-            if "data" in data:
-                for item in data["data"]:
-                    all_vectors.append(np.array(item["embedding"], dtype=np.float32))
-            elif "embeddings" in data:
-                for emb in data["embeddings"]:
-                    all_vectors.append(np.array(emb, dtype=np.float32))
-            else:
-                raise ValueError(f"Unexpected API response format: {list(data.keys())}")
+            for item in resp.data:
+                all_vectors.append(np.array(item.embedding, dtype=np.float32))
 
             if show_progress and len(texts_list) > self.batch_size:
-                logger.info("APIEmbedder: %d/%d texts embedded", min(i + self.batch_size, len(texts_list)), len(texts_list))
+                logger.info("APIEmbedder: %d/%d texts embedded",
+                            min(i + self.batch_size, len(texts_list)), len(texts_list))
 
         result = np.stack(all_vectors)
         return result.astype(np.float32)
@@ -197,8 +177,8 @@ def create_embedder(config) -> Embedder | APIEmbedder:
     """Factory: return the right embedder based on config."""
     if config.embedding.backend == "api":
         return APIEmbedder(
-            url=config.embedding.api.url,
-            api_key=config.embedding.api.api_key,
+            base_url=getattr(config, "_api_base_url", ""),
+            api_key=getattr(config, "_api_key", ""),
             model=config.embedding.api.model,
             batch_size=config.embedding.api.batch_size,
             timeout_sec=config.embedding.api.timeout_sec,

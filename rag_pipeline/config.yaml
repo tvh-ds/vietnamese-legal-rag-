@@ -20,6 +20,12 @@ chunking:
 # ---------------------------------------------------------------------------
 # Embedding model (Section 7 of Pipeline.md)
 # ---------------------------------------------------------------------------
+api:
+  # OpenAI-compatible base URL (shared by embedding + LLM)
+  base_url: "https://mkp-api.fptcloud.com"
+  # API key
+  api_key: "${FPT_API_KEY}"
+
 embedding:
   # Backend: "local" (sentence-transformers) or "api" (company embedding API)
   backend: "api"
@@ -31,10 +37,6 @@ embedding:
   
   # API backend settings (used when backend: "api")
   api:
-    # Base URL for the embedding API
-    url: "https://your-company.com/v1/embeddings"
-    # API key (read from env var EMBEDDING_API_KEY)
-    api_key: "${EMBEDDING_API_KEY}"
     # Model name to pass to the API
     model: "Vietnamese_Embedding"
     # Max tokens per input (API model supports 2048)
@@ -148,10 +150,6 @@ context:
   
   # LLM API settings (used when use_llm: true)
   llm:
-    # Base URL for the chat completions API
-    url: "https://your-company.com/v1/chat/completions"
-    # API key (read from env var LLM_API_KEY)
-    api_key: "${LLM_API_KEY}"
     # Model name
     model: "gemma-4-31B-it"
     # Sampling temperature

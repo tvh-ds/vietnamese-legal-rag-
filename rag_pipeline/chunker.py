@@ -14,8 +14,10 @@ After chunking:
 """
 
 import re
+import pickle as _pickle
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path as _Path
 from typing import Callable, Optional
 
 from data_loader import Article
@@ -480,6 +482,9 @@ class Chunker:
 # ---------------------------------------------------------------------------
 
 
+_CHUNK_CACHE = "chunks_cache.pkl"
+
+
 def chunk_articles(
     articles: list[Article],
     max_tokens: int = 512,
@@ -487,8 +492,21 @@ def chunk_articles(
     enable_context: bool = True,
     max_context_tokens: int = 100,
     llm_context_generator: object | None = None,
+    force_rechunk: bool = False,
 ) -> list[Chunk]:
-    """Convenience: chunk a list of articles with default settings."""
+    """Convenience: chunk a list of articles, with disk caching.
+
+    On first run, chunks all articles and saves to chunks_cache.pkl.
+    On subsequent runs, loads from cache (instant). Use force_rechunk=True
+    to bypass the cache.
+    """
+    if not force_rechunk and _Path(_CHUNK_CACHE).exists():
+        print(f"  Loading cached chunks from {_CHUNK_CACHE}…")
+        with open(_CHUNK_CACHE, "rb") as f:
+            chunks = _pickle.load(f)
+        print(f"  Loaded {len(chunks)} cached chunks")
+        return chunks
+
     chunker = Chunker(
         max_tokens=max_tokens,
         min_tokens=min_tokens,
@@ -497,8 +515,19 @@ def chunk_articles(
         llm_context_generator=llm_context_generator,
     )
     all_chunks: list[Chunk] = []
-    for article in articles:
+    try:
+        from tqdm import tqdm
+        it = tqdm(articles, desc="  Chunking", unit="art")
+    except ImportError:
+        it = articles
+    for article in it:
         all_chunks.extend(chunker.chunk_article(article))
+
+    # Save cache
+    with open(_CHUNK_CACHE, "wb") as f:
+        _pickle.dump(all_chunks, f)
+    print(f"  Saved {len(all_chunks)} chunks to {_CHUNK_CACHE}")
+
     return all_chunks
 
 

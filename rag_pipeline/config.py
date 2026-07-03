@@ -29,8 +29,6 @@ class ChunkingConfig:
 class EmbeddingAPIConfig:
     """Company embedding API parameters."""
 
-    url: str = ""
-    api_key: str = ""
     model: str = "Vietnamese_Embedding"
     max_seq_length: int = 2048
     batch_size: int = 64
@@ -107,8 +105,6 @@ class RerankerConfig:
 class LLMConfig:
     """LLM API parameters for context generation."""
 
-    url: str = ""
-    api_key: str = ""
     model: str = "gemma-4-31B-it"
     temperature: float = 0.3
     max_output_tokens: int = 120
@@ -162,21 +158,25 @@ class Config:
             raw = yaml.safe_load(f) or {}
 
         emb_raw = raw.get("embedding", {})
-        api_raw = emb_raw.pop("api", {}) if isinstance(emb_raw, dict) else {}
+        emb_api_raw = emb_raw.pop("api", {}) if isinstance(emb_raw, dict) else {}
         ctx_raw = raw.get("context", {})
         llm_raw = ctx_raw.pop("llm", {}) if isinstance(ctx_raw, dict) else {}
 
-        return cls(
+        # Shared API config (base_url + api_key)
+        shared_api = raw.get("api", {})
+        base_url = shared_api.get("base_url", "").rstrip("/")
+        api_key = shared_api.get("api_key", "")
+
+        # Attach shared API credentials to the config
+        result = cls(
             chunking=ChunkingConfig(**raw.get("chunking", {})),
             embedding=EmbeddingConfig(
                 **emb_raw,
                 api=EmbeddingAPIConfig(
-                    url=_resolve_env(api_raw.get("url", "")),
-                    api_key=_resolve_env(api_raw.get("api_key", "")),
-                    model=api_raw.get("model", "Vietnamese_Embedding"),
-                    max_seq_length=api_raw.get("max_seq_length", 2048),
-                    batch_size=api_raw.get("batch_size", 64),
-                    timeout_sec=api_raw.get("timeout_sec", 60),
+                    model=emb_api_raw.get("model", "Vietnamese_Embedding"),
+                    max_seq_length=emb_api_raw.get("max_seq_length", 2048),
+                    batch_size=emb_api_raw.get("batch_size", 64),
+                    timeout_sec=emb_api_raw.get("timeout_sec", 60),
                 ),
             ),
             vector_store=VectorStoreConfig(**raw.get("vector_store", {})),
@@ -187,8 +187,6 @@ class Config:
             context=ContextConfig(
                 **ctx_raw,
                 llm=LLMConfig(
-                    url=_resolve_env(llm_raw.get("url", "")),
-                    api_key=_resolve_env(llm_raw.get("api_key", "")),
                     model=llm_raw.get("model", "gemma-4-31B-it"),
                     temperature=llm_raw.get("temperature", 0.3),
                     max_output_tokens=llm_raw.get("max_output_tokens", 120),
@@ -198,6 +196,12 @@ class Config:
             data=DataConfig(**raw.get("data", {})),
             metadata=MetadataConfig(**raw.get("metadata", {})),
         )
+        result._api_base_url = base_url
+        result._api_key = api_key
+        return result
+        config._api_base_url = base_url
+        config._api_key = api_key
+        return config
 
 
 def load_config(path: str | Path = "config.yaml") -> Config:

@@ -64,8 +64,8 @@ def cmd_index(config: Config) -> None:
     llm_gen = None
     if config.context.use_llm:
         llm_gen = LLMContextGenerator(
-            url=config.context.llm.url,
-            api_key=config.context.llm.api_key,
+            base_url=getattr(config, "_api_base_url", ""),
+            api_key=getattr(config, "_api_key", ""),
             model=config.context.llm.model,
             temperature=config.context.llm.temperature,
             max_output_tokens=config.context.llm.max_output_tokens,

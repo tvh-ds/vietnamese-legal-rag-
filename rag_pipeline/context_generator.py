@@ -26,30 +26,31 @@ Tóm tắt:"""
 
 
 class LLMContextGenerator:
-    """Generate article-level context summaries via LLM API.
+    """Generate article-level context summaries via OpenAI-compatible LLM API.
 
     Usage::
 
-        gen = LLMContextGenerator(url="https://...", api_key="...", model="gemma-4-31B-it")
+        gen = LLMContextGenerator(base_url="https://...", api_key="...", model="gemma-4-31B-it")
         summary = gen.generate(article_title, article_content)
-        # If API fails, falls back to heuristic summary
     """
 
     def __init__(
         self,
-        url: str,
+        base_url: str,
         api_key: str,
         model: str = "gemma-4-31B-it",
         temperature: float = 0.3,
         max_output_tokens: int = 120,
         timeout_sec: int = 30,
     ) -> None:
-        self.url = url.rstrip("/")
-        self.api_key = api_key
+        from openai import OpenAI
+
         self.model = model
         self.temperature = temperature
         self.max_output_tokens = max_output_tokens
-        self.timeout_sec = timeout_sec
+        self._client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout_sec)
+        self.call_count = 0
+        self.error_count = 0
 
     def generate(self, title: str, content: str) -> str:
         """Generate a Vietnamese legal summary for the article.
@@ -61,7 +62,6 @@ class LLMContextGenerator:
         Returns:
             Summary string (60-120 tokens), or heuristic fallback on error.
         """
-        # Truncate content to avoid exceeding model context (262K, generous)
         content_trimmed = content[:8000]
 
         prompt = _SUMMARIZE_PROMPT.format(
@@ -70,40 +70,26 @@ class LLMContextGenerator:
         )
 
         try:
-            import requests
-
-            resp = requests.post(
-                self.url,
-                json={
-                    "model": self.model,
-                    "messages": [
-                        {"role": "user", "content": prompt},
-                    ],
-                    "temperature": self.temperature,
-                    "max_tokens": self.max_output_tokens,
-                },
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                timeout=self.timeout_sec,
+            resp = self._client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self.temperature,
+                max_tokens=self.max_output_tokens,
             )
-            resp.raise_for_status()
-            data = resp.json()
+            self.call_count += 1
+            summary = resp.choices[0].message.content.strip()
 
-            # Parse OpenAI-compatible response
-            summary = data["choices"][0]["message"]["content"].strip()
-
-            # Remove common prefixes the model might generate
             for prefix in ["Tóm tắt:", "Tóm tắt điều luật:", "Nội dung chính:"]:
                 if summary.startswith(prefix):
                     summary = summary[len(prefix):].strip()
 
             if summary:
-                logger.debug("LLM summary generated: %s", summary[:80])
+                if self.call_count % 500 == 0:
+                    logger.info("LLM: %d summaries generated (%d errors)", self.call_count, self.error_count)
                 return summary
 
         except Exception as exc:
+            self.error_count += 1
             logger.warning("LLM context generation failed, using heuristic fallback: %s", exc)
 
         return self._heuristic_fallback(title, content)
