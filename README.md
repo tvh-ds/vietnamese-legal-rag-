@@ -14,62 +14,57 @@ cd vietnamese-legal-rag-
 pip install -r rag_pipeline/requirements.txt
 ```
 
-### 2. Set up API keys
+### 2. Set API key
 
-This pipeline uses two company-hosted APIs. Export the keys as environment variables:
+Both embedding and LLM use the same OpenAI-compatible endpoint. Set one environment variable:
 
 ```powershell
 # PowerShell
-$env:EMBEDDING_API_KEY = "your-embedding-api-key"
-$env:LLM_API_KEY = "your-llm-api-key"
+$env:FPT_API_KEY = "sk-your-api-key"
 ```
 
 ```bash
 # Bash
-export EMBEDDING_API_KEY="your-embedding-api-key"
-export LLM_API_KEY="your-llm-api-key"
+export FPT_API_KEY="sk-your-api-key"
 ```
 
-### 3. Configure API endpoints
+### 3. Add your data
 
-Edit `rag_pipeline/config.yaml` — replace the placeholder URLs with your company's actual endpoints:
+Place JSON files in `data/phap_dien_dataset_45_chu_de/`. See [Data input](#data-input) for format. The config already points there.
 
-```yaml
-embedding:
-  api:
-    url: "https://your-company.com/v1/embeddings"          # ← change this
+Also place these two files in the project root (not committed — gitignored):
 
-context:
-  llm:
-    url: "https://your-company.com/v1/chat/completions"    # ← change this
-```
+- `Correct ID.json` — article content → benchmark ID mapping (50 MB)
+- `1238_question_map_phap_dien.json` — 1,238 benchmark questions
 
-### 4. Add your data
-
-Place your JSON files in the `data/` directory. See [Data input](#data-input) for supported formats.
-
-### 5. Index
-
-```bash
-python rag_pipeline/main.py -c rag_pipeline/config.yaml index
-```
-
-This runs the full offline pipeline: load → chunk → embed → store.
-
-### 6. Search
-
-```bash
-python rag_pipeline/main.py -c rag_pipeline/config.yaml search "thủ tục đấu giá tài sản"
-```
-
-### 7. Benchmark (with VLQA corpus)
+### 4. Benchmark (index + evaluate in one command)
 
 ```bash
 python rag_pipeline/benchmark.py \
-  --corpus corpus/vlqa/legal_corpus.json \
-  --questions corpus/vlqa/1238_question_map_phap_dien.json \
   --config rag_pipeline/config.yaml \
+  --questions 1238_question_map_phap_dien.json \
+  --id-map "Correct ID.json" \
   -n 50
+```
+
+This does everything: load → chunk → embed → store → retrieve → Recall@10.
+
+### 5. Subsequent runs (instant)
+
+After the first run, chunks and embeddings are cached. No `--rechunk` needed unless you change chunking params:
+
+```bash
+# Same command — skips indexing, runs benchmark only
+python rag_pipeline/benchmark.py --config rag_pipeline/config.yaml --questions 1238_question_map_phap_dien.json --id-map "Correct ID.json"
+
+# Force full re-index after changing chunking/embedding config
+python rag_pipeline/benchmark.py --config rag_pipeline/config.yaml --questions 1238_question_map_phap_dien.json --id-map "Correct ID.json" --rechunk
+```
+
+### 6. Search the index
+
+```bash
+python rag_pipeline/main.py -c rag_pipeline/config.yaml search "thủ tục đấu giá tài sản"
 ```
 
 ---
@@ -87,22 +82,22 @@ python rag_pipeline/benchmark.py \
 │   ├── main.py                         # CLI: index / search
 │   ├── benchmark.py                    # Recall@10 evaluation
 │   │
-│   ├── data_loader.py                  # JSON parser (chu_de_* format)
-│   ├── corpus_loader.py                # JSON parser (VLQA corpus format)
+│   ├── data_loader.py                  # JSON parser + benchmark ID mapping
 │   │
-│   ├── chunker.py                      # Recursive semantic chunker
-│   ├── context_generator.py            # LLM-powered article summarizer
+│   ├── chunker.py                      # Recursive semantic chunker + disk cache
+│   ├── context_generator.py            # LLM-powered article summarizer (OpenAI)
 │   │
 │   ├── embedder.py                     # Local + API embedding backends
 │   ├── vector_store.py                 # ChromaDB persistent store
-│   ├── bm25_retriever.py              # BM25 sparse retrieval
+│   ├── bm25_retriever.py              # BM25 + pyvi Vietnamese word segmentation
 │   │
 │   ├── query_rewriter.py              # Vietnamese query normalization
-│   ├── retriever.py                   # Hybrid: vector + BM25 + graph
-│   ├── reranker.py                    # MMR diversity + keyword boost
+│   ├── retriever.py                   # Hybrid: vector + BM25 + boost + rerank
+│   ├── reranker.py                    # MMR diversity + keyword overlap
 │   ├── pipeline_types.py              # Shared dataclasses
 │   │
 │   └── requirements.txt               # Python dependencies
+├── REPORT.md                           # Latest benchmark results
 ├── .gitignore
 └── README.md
 ```
@@ -152,23 +147,9 @@ Used by `data_loader.py`. Hierarchical structure: topic → section → chapter 
 
 The loader extracts: `article_id`, `title`, `content` (Nội dung — what gets chunked), document metadata from Ghi chú, and cross-references from Chỉ dẫn.
 
-### Format B — VLQA legal corpus (`legal_corpus.json`)
+### Benchmark ID mapping (`Correct ID.json`)
 
-Used by `corpus_loader.py`. Flat list of laws, each containing articles identified by numeric `aid`.
-
-```json
-[
-  {
-    "id": 0,
-    "law_id": "14/2022/TT-NHNN",
-    "content": [
-      {"aid": 56789, "content_Article": "1. Thông tư này quy định..."}
-    ]
-  }
-]
-```
-
-The loader maps `aid` → `article_id` so benchmark `relevant_laws` match correctly. Used with `benchmark.py`.
+A dict of `article_content → numeric_id` (31,721 entries). During loading, each article's `Nội dung` is matched against this dict by exact content comparison. Matched articles get a `benchmark_id` stored in ChromaDB metadata. This ID is **never embedded** — it's only used to match retrieved chunks against `relevant_laws` during evaluation.
 
 ### Adding new data
 
@@ -179,7 +160,7 @@ data:
   path: "../my_data"    # relative to config.yaml
 ```
 
-Then re-index. For custom schemas, adapt `data_loader.py` — the only contract is that it produces objects with `.article_id`, `.title`, `.content`, and `.references` attributes.
+Then run with `--rechunk`. For custom schemas, adapt `data_loader.py` — the only contract is that it produces objects with `.article_id`, `.title`, `.content`, and `.references` attributes.
 
 ---
 
@@ -190,9 +171,8 @@ Then re-index. For custom schemas, adapt `data_loader.py` — the only contract 
 | File | Tool / method |
 |------|---------------|
 | `data_loader.py` | JSON walker — flattens topic → section → chapter → article hierarchy |
-| `corpus_loader.py` | JSON walker — maps `aid` integers to article IDs for benchmark matching |
 
-Extracts document metadata (law number, effective date, validity status), structural metadata (chapter, topic, mapCode), and cross-references (Chỉ dẫn) from each article. Only the Article level downward contains meaningful legal text.
+Extracts document metadata (law number, effective date, validity status), structural metadata (chapter, topic, mapCode), cross-references (Chỉ dẫn), and benchmark IDs (via content matching against `Correct ID.json`). Only the Article level downward contains meaningful legal text.
 
 ### Phase 2 — Recursive semantic chunking
 
@@ -276,9 +256,11 @@ Built in parallel with the vector store. pyvi handles compound Vietnamese words:
 
 | File | Tool / method |
 |------|---------------|
-| `benchmark.py` | **Recall@10** on VLQA question set |
+| `benchmark.py` | **Recall@10** on 1,238 questions |
 
-For each of 1,238 questions: retrieve top-10 chunks, check if any `article_id` matches the question's `relevant_laws`. Reports `hits / total_questions`.
+Queries are pre-embedded in one API batch. For each question: retrieve top-10 chunks via full pipeline, check if any chunk's `benchmark_id` (metadata only, never embedded) matches the question's `relevant_laws`. Reports `hits / total_questions`.
+
+**Caching:** Chunks saved to `chunks_cache.pkl`. ChromaDB + BM25 index persisted. Subsequent runs skip indexing entirely unless `--rechunk` is passed.
 
 ---
 
@@ -294,13 +276,19 @@ Key sections in `config.yaml`:
 | `min_tokens` | 30 | Merge chunks shorter than this with adjacent ones |
 | `overlap_tokens` | 50 | Token overlap between adjacent chunks (prevents boundary cuts) |
 
+### `api` (shared)
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `base_url` | `https://mkp-api.fptcloud.com` | OpenAI-compatible base URL (used by both embedding and LLM) |
+| `api_key` | `${FPT_API_KEY}` | API key from environment variable |
+
 ### `embedding`
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `backend` | `api` | `api` (company endpoint) or `local` (sentence-transformers) |
 | `model_name` | `AITeamVN/Vietnamese_Embedding` | Model for local mode |
-| `api.url` | (placeholder) | Embedding API endpoint |
 | `api.model` | `Vietnamese_Embedding` | Model name sent to API |
 | `api.max_seq_length` | 2048 | Max tokens per input |
 | `api.batch_size` | 64 | Texts per API call |
@@ -310,7 +298,7 @@ Key sections in `config.yaml`:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `enabled` | `true` | Whether to prepend context to chunks |
-| `use_llm` | `true` | Use LLM API for summaries (false = heuristic) |
+| `use_llm` | `false` | Use LLM API for summaries (false = heuristic title + first sentence) |
 | `max_context_tokens` | 100 | Target summary length |
 | `llm.model` | `gemma-4-31B-it` | Model for context generation |
 | `llm.temperature` | 0.3 | Sampling temperature |
@@ -371,9 +359,9 @@ Each chunk stored in ChromaDB:
 
 ## API response formats
 
-The pipeline expects these JSON shapes from your company endpoints.
+Both APIs share `api.base_url` (e.g. `https://mkp-api.fptcloud.com`). The pipeline auto-appends `/v1/embeddings` and `/v1/chat/completions`.
 
-### Embedding API (`POST /v1/embeddings`)
+### Embedding API (`POST {base_url}/v1/embeddings`)
 
 **Request:**
 ```json
@@ -393,9 +381,9 @@ The pipeline expects these JSON shapes from your company endpoints.
 }
 ```
 
-Also supports `{"embeddings": [[...], [...]]}` format.
+Also supports `{"embeddings": [[...], [...]]}` format. Uses `requests` library with 3-retry exponential backoff on connection failures.
 
-### LLM API (`POST /v1/chat/completions`)
+### LLM API (`POST {base_url}/v1/chat/completions`)
 
 **Request:**
 ```json
@@ -407,11 +395,11 @@ Also supports `{"embeddings": [[...], [...]]}` format.
 }
 ```
 
-**Response (OpenAI-compatible):**
+**Response:**
 ```json
 {
   "choices": [{"message": {"content": "Điều luật này quy định về..."}}]
 }
 ```
 
-If your API uses a different format, adapt `embedder.py` (the `APIEmbedder.embed` method) and `context_generator.py` (the `LLMContextGenerator.generate` method) — both are isolated to response parsing in a single class.
+Uses `openai` Python library for the chat endpoint. If your API uses a different format, adapt `context_generator.py` (the `LLMContextGenerator.generate` method) and `embedder.py` (the `APIEmbedder.embed` method).
