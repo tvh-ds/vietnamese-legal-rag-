@@ -314,7 +314,9 @@ class Chunker:
         self, article: Article, text: str, parent_id: str, unit_type: str,
     ) -> list[Chunk]:
         """Sentence-aware fallback: split on sentence boundaries, merge into
-        max_tokens-sized chunks."""
+        max_tokens-sized chunks. Each produced chunk (after the first)
+        carries an overlap of the previous chunk's tail tokens so terms
+        straddling the cut remain retrievable."""
         sentences = _SENTENCE_BOUNDARY.split(text)
         if len(sentences) <= 1:
             # Can't split further — force as one chunk
@@ -329,21 +331,34 @@ class Chunker:
             if not sent:
                 continue
             candidate = f"{buffer} {sent}".strip() if buffer else sent
+
             if self.token_counter(candidate) <= self.max_tokens:
                 buffer = candidate
+                continue
+
+            # Flush the current buffer as a chunk first
+            if buffer:
+                order += 1
+                chunks.append(self._make_chunk(
+                    article, buffer, "SENTENCE", parent_id, order,
+                ))
+
+            # Handle a single oversized sentence
+            if self.token_counter(sent) > self.max_tokens:
+                order += 1
+                chunks.append(self._make_chunk(
+                    article, sent, "SENTENCE", parent_id, order,
+                ))
+                buffer = ""
             else:
-                if buffer:
-                    order += 1
-                    chunks.append(self._make_chunk(
-                        article, buffer, "SENTENCE", parent_id, order,
-                    ))
-                # If the single sentence itself exceeds max, force it as a chunk
-                if self.token_counter(sent) > self.max_tokens:
-                    order += 1
-                    chunks.append(self._make_chunk(
-                        article, sent, "SENTENCE", parent_id, order,
-                    ))
-                    buffer = ""
+                # Carry overlap tokens from the previous produced chunk
+                if self.overlap_tokens > 0 and chunks:
+                    prev_tokens = chunks[-1].raw_content.split()
+                    if len(prev_tokens) > self.overlap_tokens:
+                        overlap_text = " ".join(prev_tokens[-self.overlap_tokens:])
+                        buffer = f"{overlap_text} {sent}".strip()
+                    else:
+                        buffer = sent
                 else:
                     buffer = sent
 
@@ -489,6 +504,7 @@ def chunk_articles(
     articles: list[Article],
     max_tokens: int = 512,
     min_tokens: int = 30,
+    overlap_tokens: int = 0,
     enable_context: bool = True,
     max_context_tokens: int = 100,
     llm_context_generator: object | None = None,
@@ -510,6 +526,7 @@ def chunk_articles(
     chunker = Chunker(
         max_tokens=max_tokens,
         min_tokens=min_tokens,
+        overlap_tokens=overlap_tokens,
         enable_context=enable_context,
         max_context_tokens=max_context_tokens,
         llm_context_generator=llm_context_generator,

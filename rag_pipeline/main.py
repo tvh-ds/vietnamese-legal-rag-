@@ -84,6 +84,7 @@ def cmd_index(config: Config) -> None:
         articles,
         max_tokens=config.chunking.max_tokens,
         min_tokens=config.chunking.min_tokens,
+        overlap_tokens=config.chunking.overlap_tokens,
         enable_context=config.context.enabled,
         max_context_tokens=config.context.max_context_tokens,
         llm_context_generator=llm_gen,
@@ -180,9 +181,14 @@ def cmd_search(
     reranker = None
     if config.reranker.enabled:
         reranker = Reranker(
-            lambda_mmr=config.reranker.lambda_mmr,
-            keyword_boost=config.reranker.keyword_boost,
-            diversity_weight=config.reranker.diversity_weight,
+            base_url=getattr(config, "_api_base_url", ""),
+            api_key=config.reranker.bge.api_key,
+            model=config.reranker.bge.model,
+            endpoint=config.reranker.bge.endpoint,
+            max_candidates=config.reranker.bge.max_candidates,
+            top_n=config.reranker.bge.top_n,
+            timeout_sec=config.reranker.bge.timeout_sec,
+            blend_weight=config.reranker.bge.blend_weight,
         )
 
     # BM25 retriever (if available)

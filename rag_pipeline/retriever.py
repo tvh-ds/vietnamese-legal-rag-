@@ -43,6 +43,7 @@ class Retriever:
         articles: list[Article],
         *,
         top_k: int = 10,
+        candidate_pool_size: int = 50,
         similarity_threshold: float = 0.3,
         enable_metadata_filtering: bool = True,
         enable_graph_expansion: bool = True,
@@ -59,6 +60,7 @@ class Retriever:
         self.embedder = embedder
         self.vector_store = vector_store
         self.top_k = top_k
+        self.candidate_pool_size = candidate_pool_size
         self.similarity_threshold = similarity_threshold
         self.enable_metadata_filtering = enable_metadata_filtering
         self.enable_graph_expansion = enable_graph_expansion
@@ -105,7 +107,7 @@ class Retriever:
             q_emb = np.asarray(query_embedding, dtype=np.float32).ravel()
         else:
             q_emb = self.embedder.embed_single(query)
-        vector_results = self.vector_store.query(q_emb, top_k=k * 2)
+        vector_results = self.vector_store.query(q_emb, top_k=self.candidate_pool_size)
 
         # Convert distance (cosine 0=identical, 2=opposite) to similarity score
         for r in vector_results:
@@ -115,7 +117,7 @@ class Retriever:
         if self.bm25_retriever is not None and self.bm25_retriever.is_built():
             bm25_raw = self.bm25_retriever.search(query)
             # Fuse BM25 results with vector results
-            vector_results = self._fuse_bm25(vector_results, bm25_raw, k * 2)
+            vector_results = self._fuse_bm25(vector_results, bm25_raw, self.candidate_pool_size)
 
         # Stage 2 — Metadata filtering / boosting
         scored = self._apply_metadata_boost(vector_results, filter_topic_id)
@@ -125,7 +127,7 @@ class Retriever:
             graph_results = self._graph_expand(scored[:k], query_embedding)
             scored = self._merge_results(scored, graph_results)
 
-        # Stage 4 — Rerank with cross-attention / MMR / keyword boost
+        # Stage 4 — Rerank with BGE reranker API
         if self.reranker is not None:
             scored = self.reranker.rerank(query, scored, top_k=k)
 
@@ -160,17 +162,21 @@ class Retriever:
 
                 # Boost ACTIVE documents
                 if self.prefer_active and "CÓ_HIỆU_LỰC" in str(meta.get("status", "")):
-                    boost += self.metadata_boost * 0.5
+                    boost += self.metadata_boost * 0.2
 
                 # Boost matching topic
                 if self.topic_boost and filter_topic_id:
                     if meta.get("topic_id") == filter_topic_id:
                         boost += self.metadata_boost * 0.5
 
-                # Prefer ARTICLE-level chunks (more context)
-                if meta.get("unit_type") == "ARTICLE":
+                # Prefer CLAUSE/POINT-level chunks for specific queries;
+                # ARTICLE units still get a small positive signal.
+                unit = meta.get("unit_type")
+                if unit == "CLAUSE":
                     boost += self.metadata_boost * 0.2
-                elif meta.get("unit_type") == "CLAUSE":
+                elif unit == "POINT":
+                    boost += self.metadata_boost * 0.1
+                elif unit == "ARTICLE":
                     boost += self.metadata_boost * 0.1
 
                 score += boost

@@ -4,83 +4,65 @@ Implements Section 11 of Pipeline.md:
 
   1. Merge chunks from different sources (vector search + graph expansion).
   2. Reranker reassesses relevance of each chunk to the original query.
-  3. Select highest-scoring, most diverse chunks for the final context.
+  3. Select highest-scoring chunks for the final context.
 
 Strategy:
-  - Primary: MMR (Maximal Marginal Relevance) — balances relevance with diversity.
-  - Keyword boost: TF-like overlap between query tokens and chunk content.
-  - Optional: Cross-encoder reranking when a suitable model is available.
+  - API-based BGE reranker via company endpoint.
+  - Falls back to hybrid scores if the API call fails.
 """
 
 from __future__ import annotations
 
 import logging
-import re
-from typing import Optional, Sequence
+from typing import Optional
 
-import numpy as np
+import requests
 
 from pipeline_types import RetrievalResult
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Tokenizer for Vietnamese keyword extraction
-# ---------------------------------------------------------------------------
-
-# Simple word tokenizer: split on whitespace + punctuation, keep words >= 2 chars.
-_WORD_RE = re.compile(r"[a-zà-ỹđ]+", re.IGNORECASE)
-
-
-def _tokenize(text: str) -> set[str]:
-    """Extract lowercase word tokens from Vietnamese text."""
-    return {m.group().lower() for m in _WORD_RE.finditer(text) if len(m.group()) >= 2}
-
-
-# ---------------------------------------------------------------------------
-# Reranker
-# ---------------------------------------------------------------------------
-
-
 class Reranker:
-    """Re-rank retrieval results using MMR diversity + keyword boosting.
+    """Re-rank retrieval results using the company BGE reranker API.
 
     Usage::
 
-        reranker = Reranker(lambda_mmr=0.7, keyword_boost=0.15)
+        reranker = Reranker(base_url="https://...", api_key="sk-...")
         reranked = reranker.rerank(query, candidates, top_k=5)
     """
 
     def __init__(
         self,
-        lambda_mmr: float = 0.7,
-        keyword_boost: float = 0.15,
-        diversity_weight: float = 0.15,
+        base_url: str,
+        api_key: str,
+        model: str = "bge-reranker-v2-m3",
+        endpoint: str = "/v1/rerank",
+        max_candidates: int = 30,
+        top_n: int = 30,
+        timeout_sec: int = 60,
+        blend_weight: float = 1.0,
     ) -> None:
-        """
-        Args:
-            lambda_mmr: Relevance weight in MMR (1.0 = pure relevance, 0.0 = pure diversity).
-            keyword_boost: Weight for keyword-overlap score.
-            diversity_weight: Weight for diversity penalty in MMR.
-        """
-        self.lambda_mmr = lambda_mmr
-        self.keyword_boost = keyword_boost
-        self.diversity_weight = diversity_weight
-
-    # -- public API ----------------------------------------------------------
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.model = model
+        self.endpoint = endpoint
+        self.max_candidates = max_candidates
+        self.top_n = top_n
+        self.timeout_sec = timeout_sec
+        self.blend_weight = blend_weight
 
     def rerank(
         self,
         query: str,
         candidates: list[RetrievalResult],
-        top_k: int = 5,
+        top_k: int = 10,
     ) -> list[RetrievalResult]:
-        """Re-rank candidates using MMR + keyword boosting.
+        """Re-rank candidates using the BGE reranker API.
 
         Args:
             query: The original user query.
-            candidates: Chunks from vector search + graph expansion.
+            candidates: Chunks from vector search + BM25 fusion.
             top_k: Number of results to keep after reranking.
 
         Returns:
@@ -89,74 +71,33 @@ class Reranker:
         if not candidates:
             return []
 
-        n = len(candidates)
-        if n <= 1:
+        if len(candidates) <= 1:
             return candidates
 
-        # Step 1 — Compute keyword-boosted relevance scores
-        query_tokens = _tokenize(query)
-        keyword_scores = np.array([
-            self._keyword_overlap_score(query_tokens, r.content)
-            for r in candidates
-        ])
-        base_scores = np.array([r.score for r in candidates])
+        pool = candidates[: self.max_candidates]
+        documents = [r.content for r in pool]
+        n_docs = len(documents)
 
-        # Combined relevance: base score + keyword boost
-        relevance = base_scores + self.keyword_boost * keyword_scores
+        effective_top_n = min(n_docs, max(top_k, self.top_n))
 
-        # Step 2 — Build pairwise similarity matrix for diversity
-        # Use keyword overlap as a fast proxy for content similarity
-        all_tokens = [_tokenize(r.content) for r in candidates]
-        similarity = np.zeros((n, n), dtype=np.float32)
-        for i in range(n):
-            for j in range(i + 1, n):
-                sim = self._jaccard(all_tokens[i], all_tokens[j])
-                similarity[i, j] = sim
-                similarity[j, i] = sim
+        try:
+            api_scores = self._call_api(query, documents, effective_top_n, n_docs)
+        except Exception as e:
+            logger.warning("BGE reranker API call failed: %s", e)
+            return candidates[:top_k]
 
-        # Step 3 — MMR greedy selection
-        selected_indices: list[int] = []
-        remaining = set(range(n))
+        if api_scores is None:
+            return candidates[:top_k]
 
-        # First pick: highest combined relevance
-        first = int(np.argmax(relevance))
-        selected_indices.append(first)
-        remaining.remove(first)
-
-        # Subsequent picks: MMR
-        while remaining and len(selected_indices) < top_k:
-            best_idx = -1
-            best_score = -1.0
-            for idx in remaining:
-                # Diversity penalty: max similarity to any already-selected chunk
-                max_sim = max(
-                    similarity[idx, sel] for sel in selected_indices
-                ) if selected_indices else 0.0
-
-                mmr_score = (
-                    self.lambda_mmr * relevance[idx]
-                    - self.diversity_weight * max_sim
-                )
-                if mmr_score > best_score:
-                    best_score = mmr_score
-                    best_idx = idx
-
-            if best_idx == -1:
-                break
-            selected_indices.append(best_idx)
-            remaining.remove(best_idx)
-
-        # Step 4 — Build result with updated scores
+        original_scores = {r.chunk_id: r.score for r in pool}
         reranked: list[RetrievalResult] = []
-        for rank, idx in enumerate(selected_indices):
-            r = candidates[idx]
-            # Recompute final score combining all signals
-            final_score = (
-                base_scores[idx]
-                + self.keyword_boost * keyword_scores[idx]
-                - self.diversity_weight * (rank * 0.02)  # small rank penalty
-            )
-            final_score = max(0.0, min(final_score, 1.0))
+        seen_ids: set[str] = set()
+
+        for idx, api_score in api_scores:
+            r = pool[idx]
+            seen_ids.add(r.chunk_id)
+            orig = original_scores.get(r.chunk_id, 0.0)
+            blended = self.blend_weight * api_score + (1 - self.blend_weight) * orig
             reranked.append(RetrievalResult(
                 chunk_id=r.chunk_id,
                 content=r.content,
@@ -165,27 +106,74 @@ class Reranker:
                 unit_type=r.unit_type,
                 order=r.order,
                 hierarchy_path=r.hierarchy_path,
-                score=final_score,
+                score=blended,
                 source=r.source,
                 metadata=r.metadata,
             ))
 
-        return reranked
+        for r in pool:
+            if r.chunk_id not in seen_ids:
+                orig = original_scores.get(r.chunk_id, 0.0)
+                blended = (1 - self.blend_weight) * orig
+                reranked.append(RetrievalResult(
+                    chunk_id=r.chunk_id,
+                    content=r.content,
+                    raw_content=r.raw_content,
+                    article_id=r.article_id,
+                    unit_type=r.unit_type,
+                    order=r.order,
+                    hierarchy_path=r.hierarchy_path,
+                    score=blended,
+                    source=r.source,
+                    metadata=r.metadata,
+                ))
 
-    # -- scoring helpers -----------------------------------------------------
+        reranked.sort(key=lambda x: x.score, reverse=True)
+        return reranked[:top_k]
 
-    @staticmethod
-    def _keyword_overlap_score(query_tokens: set[str], content: str) -> float:
-        """Compute Jaccard-like keyword overlap between query and chunk."""
-        content_tokens = _tokenize(content)
-        if not query_tokens or not content_tokens:
-            return 0.0
-        intersection = query_tokens & content_tokens
-        return len(intersection) / len(query_tokens)
+    def _call_api(
+        self,
+        query: str,
+        documents: list[str],
+        top_n: int,
+        n_docs: int = 0,
+    ) -> Optional[list[tuple[int, float]]]:
+        """Call the BGE reranker API and return list of (index, score)."""
+        url = f"{self.base_url}{self.endpoint}"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "query": query,
+            "documents": documents,
+            "top_n": top_n,
+        }
 
-    @staticmethod
-    def _jaccard(a: set[str], b: set[str]) -> float:
-        """Jaccard similarity between two token sets."""
-        if not a or not b:
-            return 0.0
-        return len(a & b) / len(a | b)
+        resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout_sec)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if "results" in data:
+            results = data["results"]
+            if results and isinstance(results[0], dict):
+                parsed = [
+                    (r["index"], r.get("relevance_score", r.get("score", 0.0)))
+                    for r in results
+                ]
+        elif "scores" in data:
+            parsed = [(i, s) for i, s in enumerate(data["scores"])]
+        elif "data" in data:
+            parsed = [(r["index"], r["score"]) for r in data["data"]]
+        else:
+            logger.warning("Unexpected reranker response shape: %s", data)
+            return None
+
+        valid = [(idx, score) for idx, score in parsed if 0 <= idx < n_docs]
+        if len(valid) < len(parsed):
+            logger.warning(
+                "%d/%d reranker results had out-of-range indices (pool size %d)",
+                len(parsed) - len(valid), len(parsed), n_docs,
+            )
+        return valid

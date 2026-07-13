@@ -129,12 +129,12 @@ class APIEmbedder:
         batch_size: int = 64,
         timeout_sec: int = 60,
     ) -> None:
-        from openai import OpenAI
-
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
         self.model = model
         self.batch_size = batch_size
+        self.timeout_sec = timeout_sec
         self._dim: int | None = None
-        self._client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout_sec)
 
     @property
     def dim(self) -> int:
@@ -146,24 +146,56 @@ class APIEmbedder:
 
     def embed(self, texts: Sequence[str], show_progress: bool = False) -> np.ndarray:
         """Embed texts via API, returning (len(texts), dim) float32 array."""
+        import time as _time
+        import requests
+
         if not texts:
             return np.empty((0, 1024), dtype=np.float32)
 
         all_vectors: list[np.ndarray] = []
         texts_list = list(texts)
+        total_batches = (len(texts_list) + self.batch_size - 1) // self.batch_size
 
-        for i in range(0, len(texts_list), self.batch_size):
+        it = range(0, len(texts_list), self.batch_size)
+        if show_progress:
+            from tqdm import tqdm
+            it = tqdm(it, total=total_batches, desc="  Embedding", unit="batch")
+
+        url = f"{self.base_url}/v1/embeddings"
+        for i in it:
             batch = texts_list[i : i + self.batch_size]
-            resp = self._client.embeddings.create(
-                model=self.model,
-                input=batch,
-            )
-            for item in resp.data:
-                all_vectors.append(np.array(item.embedding, dtype=np.float32))
 
-            if show_progress and len(texts_list) > self.batch_size:
-                logger.info("APIEmbedder: %d/%d texts embedded",
-                            min(i + self.batch_size, len(texts_list)), len(texts_list))
+            for attempt in range(3):
+                try:
+                    resp = requests.post(
+                        url,
+                        json={"model": self.model, "input": batch},
+                        headers={
+                            "Authorization": f"Bearer {self.api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        timeout=self.timeout_sec,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+
+                    if "data" in data:
+                        for item in data["data"]:
+                            all_vectors.append(np.array(item["embedding"], dtype=np.float32))
+                    elif "embeddings" in data:
+                        for emb in data["embeddings"]:
+                            all_vectors.append(np.array(emb, dtype=np.float32))
+                    else:
+                        raise ValueError(f"Unexpected API response: {list(data.keys())}")
+                    break
+
+                except (requests.ConnectionError, requests.Timeout) as e:
+                    if attempt < 2:
+                        wait = (attempt + 1) * 2
+                        logger.warning("Embedding API retry %d/3 after %ds: %s", attempt + 1, wait, e)
+                        _time.sleep(wait)
+                    else:
+                        raise
 
         result = np.stack(all_vectors)
         return result.astype(np.float32)

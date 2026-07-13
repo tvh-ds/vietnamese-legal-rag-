@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Recall@10 benchmark using the data/ pipeline.
+"""Recall@1 / @3 / @10 benchmark using the data/ pipeline.
 
 Indexes articles from data/ (with benchmark IDs from Correct ID.json),
 then evaluates retrieval quality against the question set.
@@ -9,7 +9,6 @@ Usage:
         --config rag_pipeline/config.yaml \\
         --questions 1238_question_map_phap_dien.json \\
         --id-map "Correct ID.json" \\
-        -n 50
 """
 
 from __future__ import annotations
@@ -43,7 +42,7 @@ logger = logging.getLogger("benchmark")
 # ---------------------------------------------------------------------------
 
 class Benchmark:
-    """Recall@10 benchmark — indexes data/ then evaluates retrieval."""
+    """Recall@1 / @3 / @10 benchmark — indexes data/ then evaluates retrieval."""
 
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -75,17 +74,25 @@ class Benchmark:
             context_phrase=self.config.query_rewriter.context_phrase,
         ) if self.config.query_rewriter.enabled else None
 
-        reranker = Reranker(
-            lambda_mmr=self.config.reranker.lambda_mmr,
-            keyword_boost=self.config.reranker.keyword_boost,
-            diversity_weight=self.config.reranker.diversity_weight,
-        ) if self.config.reranker.enabled else None
+        reranker = None
+        if self.config.reranker.enabled:
+            reranker = Reranker(
+                base_url=getattr(self.config, "_api_base_url", ""),
+                api_key=self.config.reranker.bge.api_key,
+                model=self.config.reranker.bge.model,
+                endpoint=self.config.reranker.bge.endpoint,
+                max_candidates=self.config.reranker.bge.max_candidates,
+                top_n=self.config.reranker.bge.top_n,
+                timeout_sec=self.config.reranker.bge.timeout_sec,
+                blend_weight=self.config.reranker.bge.blend_weight,
+            )
 
         retriever = Retriever(
             embedder=embedder,
             vector_store=store,
             articles=articles,
             top_k=self.config.retrieval.top_k,
+            candidate_pool_size=self.config.retrieval.candidate_pool_size,
             similarity_threshold=self.config.retrieval.similarity_threshold,
             enable_metadata_filtering=self.config.retrieval.enable_metadata_filtering,
             enable_graph_expansion=False,
@@ -99,51 +106,89 @@ class Benchmark:
             bm25_weight=self.config.bm25.fusion_weight,
         )
 
-        # 4. Evaluate
-        print(f"\nEvaluating {len(questions)} questions (Recall@10)…")
-        hits = 0
+        # 4. Pre-embed all queries (one API batch — fast + retry-safe)
+        print(f"\nEmbedding {len(questions)} queries…")
+        query_texts = [q["question"] for q in questions]
+        if rewriter is not None:
+            query_texts = [rewriter.rewrite(t) for t in query_texts]
+        query_embeddings = embedder.embed(query_texts, show_progress=True)
+
+        # 5. Evaluate
+        print(f"\nEvaluating {len(questions)} questions (Recall@1 / @3 / @10)…")
+        hits_at_1 = 0
+        hits_at_3 = 0
+        hits_at_10 = 0
         per_question: list[dict] = []
 
-        for i, q in enumerate(questions):
-            query_text = q["question"]
+        from tqdm import tqdm
+        q_iter = tqdm(enumerate(questions), total=len(questions), desc="  Benchmarking", unit="q")
+        for i, q in q_iter:
             relevant = set(str(lid) for lid in q["relevant_laws"])
 
-            if rewriter is not None:
-                query_text = rewriter.rewrite(query_text)
-
-            results = retriever.retrieve(query_text, top_k=10)
+            results = retriever.retrieve(
+                query_texts[i], top_k=10,
+                query_embedding=query_embeddings[i],
+            )
 
             # Match by benchmark_id (metadata only — never embedded)
-            retrieved_ids = {
+            ranked_ids = [
                 r.metadata.get("benchmark_id", "")
                 for r in results
-            }
-            overlap = retrieved_ids & relevant
-            hit = len(overlap) > 0
-            if hit:
-                hits += 1
+            ]
+
+            overlap_at_1 = set(ranked_ids[:1]) & relevant
+            overlap_at_3 = set(ranked_ids[:3]) & relevant
+            overlap_at_10 = set(ranked_ids[:10]) & relevant
+
+            hit_at_1 = len(overlap_at_1) > 0
+            hit_at_3 = len(overlap_at_3) > 0
+            hit_at_10 = len(overlap_at_10) > 0
+
+            if hit_at_1:
+                hits_at_1 += 1
+            if hit_at_3:
+                hits_at_3 += 1
+            if hit_at_10:
+                hits_at_10 += 1
 
             per_question.append({
                 "qid": q["qid"],
                 "question": q["question"][:100],
                 "relevant_count": len(relevant),
                 "retrieved_count": len(results),
-                "hit": hit,
-                "overlap": list(overlap)[:5],
+                "hit_at_1": hit_at_1,
+                "hit_at_3": hit_at_3,
+                "hit_at_10": hit_at_10,
+                "hit": hit_at_10,
+                "overlap": list(overlap_at_10)[:5],
             })
 
             if (i + 1) % 100 == 0:
-                print(f"  [{i + 1}/{len(questions)}] Recall@10: {hits / (i + 1):.4f}")
+                print(
+                    f"  [{i + 1}/{len(questions)}] "
+                    f"R@1: {hits_at_1 / (i + 1):.4f}  "
+                    f"R@3: {hits_at_3 / (i + 1):.4f}  "
+                    f"R@10: {hits_at_10 / (i + 1):.4f}"
+                )
 
-        recall = hits / len(questions) if questions else 0.0
+        recall_at_1 = hits_at_1 / len(questions) if questions else 0.0
+        recall_at_3 = hits_at_3 / len(questions) if questions else 0.0
+        recall_at_10 = hits_at_10 / len(questions) if questions else 0.0
         print(f"\n{'=' * 40}")
-        print(f"Recall@10: {recall:.4f}  ({hits}/{len(questions)})")
+        print(f"Recall@1:  {recall_at_1:.4f}  ({hits_at_1}/{len(questions)})")
+        print(f"Recall@3:  {recall_at_3:.4f}  ({hits_at_3}/{len(questions)})")
+        print(f"Recall@10: {recall_at_10:.4f}  ({hits_at_10}/{len(questions)})")
         print(f"{'=' * 40}")
 
         return {
-            "recall_at_10": recall,
+            "recall_at_1": recall_at_1,
+            "recall_at_3": recall_at_3,
+            "recall_at_10": recall_at_10,
             "total_questions": len(questions),
-            "hits": hits,
+            "hits_at_1": hits_at_1,
+            "hits_at_3": hits_at_3,
+            "hits_at_10": hits_at_10,
+            "hits": hits_at_10,
             "per_question": per_question,
         }
 
@@ -201,6 +246,7 @@ class Benchmark:
             articles,
             max_tokens=self.config.chunking.max_tokens,
             min_tokens=self.config.chunking.min_tokens,
+            overlap_tokens=self.config.chunking.overlap_tokens,
             enable_context=self.config.context.enabled,
             max_context_tokens=self.config.context.max_context_tokens,
             llm_context_generator=llm_gen,

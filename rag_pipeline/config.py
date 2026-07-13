@@ -82,6 +82,7 @@ class RetrievalConfig:
     """Retrieval parameters (Section 10 of Pipeline.md)."""
 
     top_k: int = 10
+    candidate_pool_size: int = 50
     similarity_threshold: float = 0.3
     enable_metadata_filtering: bool = True
     enable_graph_expansion: bool = True
@@ -92,13 +93,24 @@ class RetrievalConfig:
 
 
 @dataclass
+class BGERerankerConfig:
+    """API BGE reranker parameters."""
+
+    model: str = "bge-reranker-v2-m3"
+    api_key: str = "${FPT_RERANKER_API_KEY}"
+    endpoint: str = "/v1/rerank"
+    max_candidates: int = 30
+    top_n: int = 30
+    timeout_sec: int = 60
+    blend_weight: float = 1.0
+
+
+@dataclass
 class RerankerConfig:
     """Reranker parameters (Section 11 of Pipeline.md)."""
 
-    enabled: bool = True
-    lambda_mmr: float = 0.7
-    keyword_boost: float = 0.15
-    diversity_weight: float = 0.15
+    enabled: bool = False
+    bge: BGERerankerConfig = field(default_factory=BGERerankerConfig)
 
 
 @dataclass
@@ -161,6 +173,8 @@ class Config:
         emb_api_raw = emb_raw.pop("api", {}) if isinstance(emb_raw, dict) else {}
         ctx_raw = raw.get("context", {})
         llm_raw = ctx_raw.pop("llm", {}) if isinstance(ctx_raw, dict) else {}
+        reranker_raw = raw.get("reranker", {})
+        bge_raw = reranker_raw.pop("bge", {}) if isinstance(reranker_raw, dict) else {}
 
         # Shared API config (base_url + api_key)
         shared_api = raw.get("api", {})
@@ -183,7 +197,18 @@ class Config:
             query_rewriter=QueryRewriterConfig(**raw.get("query_rewriter", {})),
             bm25=BM25Config(**raw.get("bm25", {})),
             retrieval=RetrievalConfig(**raw.get("retrieval", {})),
-            reranker=RerankerConfig(**raw.get("reranker", {})),
+            reranker=RerankerConfig(
+                enabled=reranker_raw.get("enabled", False),
+                bge=BGERerankerConfig(
+                    model=bge_raw.get("model", "bge-reranker-v2-m3"),
+                    api_key=_resolve_env(bge_raw.get("api_key", "${FPT_RERANKER_API_KEY}")),
+                    endpoint=bge_raw.get("endpoint", "/v1/rerank"),
+                    max_candidates=bge_raw.get("max_candidates", 30),
+                    top_n=bge_raw.get("top_n", 30),
+                    timeout_sec=bge_raw.get("timeout_sec", 60),
+                    blend_weight=bge_raw.get("blend_weight", 1.0),
+                ),
+            ),
             context=ContextConfig(
                 **ctx_raw,
                 llm=LLMConfig(
@@ -199,9 +224,6 @@ class Config:
         result._api_base_url = base_url
         result._api_key = api_key
         return result
-        config._api_base_url = base_url
-        config._api_key = api_key
-        return config
 
 
 def load_config(path: str | Path = "config.yaml") -> Config:

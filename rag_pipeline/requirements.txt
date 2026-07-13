@@ -8,9 +8,12 @@ openai>=1.0.0
 pyyaml>=6.0
 numpy>=1.24.0
 
+# HTTP client (reranker + embedding API)
+requests>=2.31.0
+
 # BM25 sparse retrieval + Vietnamese word segmentation
 rank-bm25>=0.2.2
 pyvi>=0.0.3
 
-# Optional: progress bars during embedding
+# Progress bars
 tqdm>=4.66.0

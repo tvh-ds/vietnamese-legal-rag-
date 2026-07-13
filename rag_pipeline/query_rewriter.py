@@ -171,6 +171,9 @@ class QueryRewriter:
         if not query:
             return query
 
+        # Step 0: Strip conversational chit-chat preamble and question prefixes
+        query = self._strip_preamble(query)
+
         # Step 1: Detect if the query lacks Vietnamese diacritics (telex mode)
         is_telex = self._likely_telex(query)
 
@@ -220,6 +223,34 @@ class QueryRewriter:
             else:
                 expanded.append(w)
         return " ".join(expanded)
+
+    # -- preamble stripping --------------------------------------------------
+
+    @staticmethod
+    def _strip_preamble(query: str) -> str:
+        """Remove conversational chit-chat openers and leading question numbers.
+
+        Targets short phatic openers used in legal Q&A threads (e.g.
+        "Cho tôi hỏi", "Dạ,", "Admin cho em hỏi", "Thưa luật sư") and
+        leading numeric prefixes like "1.", "2.", "15." that label
+        multi-part questions.
+        """
+        _PREAMBLE_PATTERNS = [
+            r"^\s*(?:cho\s+tôi\s+hỏi|dạ\s*[, ]*|admin\s+cho\s+em\s+hỏi|"
+            r"thưa\s+luật\s+sư|nhờ\s+ban\s+tư\s+vấn|em\s+muốn\s+hỏi|"
+            r"tôi\s+đang\s+tìm\s+hiểu|tôi\s+không\s+may|tới\s+đây\s+có|"
+            r"xin\s+hỏi)",
+        ]
+        for pat in _PREAMBLE_PATTERNS:
+            new_q = re.sub(
+                pat, "", query, count=1, flags=re.IGNORECASE
+            ).strip()
+            if new_q != query:
+                query = new_q
+                break
+
+        query = re.sub(r"^\s*\d+\.\s*", "", query).strip()
+        return query
 
     # -- context appending ---------------------------------------------------
 
