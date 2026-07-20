@@ -1,10 +1,11 @@
-"""Hybrid retrieval combining vector search, metadata filtering, and graph expansion.
+"""Hybrid retrieval combining vector search, BM25 fusion, and metadata filtering.
 
 Implements Sections 10 & 11 of Pipeline.md:
 
   1. Vector Search — semantic similarity via embeddings.
-  2. Metadata Filtering — filter/boost by status, effectiveDate, topic, unitType.
-  3. Graph Expansion — follow article references (Chỉ dẫn) to pull in related chunks.
+  2. BM25 Fusion — sparse term matching blended with dense scores.
+  3. Metadata Filtering — filter/boost by status, effectiveDate, topic, unitType.
+  4. Reranking — optional BGE or LLM reranker.
 """
 
 from __future__ import annotations
@@ -15,9 +16,7 @@ from typing import Optional
 import numpy as np
 
 from bm25_retriever import BM25Retriever
-from data_loader import Article
 from embedder import Embedder
-from reranker import Reranker
 from pipeline_types import RetrievalResult
 from vector_store import VectorStore
 
@@ -32,30 +31,30 @@ class Retriever:
     """Hybrid retriever for Vietnamese legal chunks.
 
     Combines dense vector search + BM25 sparse retrieval with
-    metadata-based filtering/boosting and optional graph expansion
-    through article cross-references.
+    metadata-based filtering/boosting.
     """
 
     def __init__(
         self,
         embedder: Embedder,
         vector_store: VectorStore,
-        articles: list[Article],
         *,
+
         top_k: int = 10,
         candidate_pool_size: int = 50,
         similarity_threshold: float = 0.3,
         enable_metadata_filtering: bool = True,
-        enable_graph_expansion: bool = True,
-        expansion_max_articles: int = 5,
         vector_weight: float = 0.7,
         metadata_boost: float = 0.2,
-        graph_boost: float = 0.1,
         prefer_active: bool = True,
         topic_boost: bool = True,
-        reranker: Reranker | None = None,
+        reranker: "Reranker | LLMReranker | None" = None,
         bm25_retriever: BM25Retriever | None = None,
         bm25_weight: float = 0.5,
+        fusion_method: str = "weighted",
+        rrf_k: int = 60,
+        rrf_vector_weight: float = 1.0,
+        rrf_bm25_weight: float = 1.0,
     ) -> None:
         self.embedder = embedder
         self.vector_store = vector_store
@@ -63,21 +62,17 @@ class Retriever:
         self.candidate_pool_size = candidate_pool_size
         self.similarity_threshold = similarity_threshold
         self.enable_metadata_filtering = enable_metadata_filtering
-        self.enable_graph_expansion = enable_graph_expansion
-        self.expansion_max_articles = expansion_max_articles
         self.vector_weight = vector_weight
         self.metadata_boost = metadata_boost
-        self.graph_boost = graph_boost
         self.prefer_active = prefer_active
         self.topic_boost = topic_boost
         self.reranker = reranker
         self.bm25_retriever = bm25_retriever
         self.bm25_weight = bm25_weight
-
-        # Build article lookup by article_id for graph expansion
-        self._article_by_id: dict[str, Article] = {
-            a.article_id: a for a in articles
-        }
+        self.fusion_method = fusion_method
+        self.rrf_k = rrf_k
+        self.rrf_vector_weight = rrf_vector_weight
+        self.rrf_bm25_weight = rrf_bm25_weight
 
     # -- public API ----------------------------------------------------------
 
@@ -122,17 +117,12 @@ class Retriever:
         # Stage 2 — Metadata filtering / boosting
         scored = self._apply_metadata_boost(vector_results, filter_topic_id)
 
-        # Stage 3 — Graph expansion
-        if self.enable_graph_expansion:
-            graph_results = self._graph_expand(scored[:k], query_embedding)
-            scored = self._merge_results(scored, graph_results)
-
-        # Stage 4 — Rerank with BGE reranker API
+        # Stage 3 — Rerank
         if self.reranker is not None:
             scored = self.reranker.rerank(query, scored, top_k=k)
-
-        # Sort by combined score, deduplicate, trim
-        scored.sort(key=lambda r: r.score, reverse=True)
+        else:
+            # Sort by combined score only when no reranker was used
+            scored.sort(key=lambda r: r.score, reverse=True)
         seen_ids: set[str] = set()
         final: list[RetrievalResult] = []
         for r in scored:
@@ -184,7 +174,7 @@ class Retriever:
             out.append(RetrievalResult(
                 chunk_id=r["chunk_id"],
                 content=r.get("content", ""),
-                raw_content="",  # Will be populated below
+                raw_content=meta.get("raw_content", r.get("content", "")),
                 article_id=meta.get("article_id", ""),
                 unit_type=meta.get("unit_type", "ARTICLE"),
                 order=meta.get("order", 0),
@@ -195,83 +185,6 @@ class Retriever:
             ))
         return out
 
-    # -- graph expansion -----------------------------------------------------
-
-    def _graph_expand(
-        self,
-        top_results: list[RetrievalResult],
-        query_embedding: np.ndarray,
-    ) -> list[RetrievalResult]:
-        """Expand results by following article cross-references.
-
-        For each top result's article, look up its references (Chỉ dẫn),
-        find those referenced articles' chunks in the vector store,
-        and add them to the candidate pool.
-        """
-        seen_article_ids: set[str] = set()
-        referenced_article_ids: set[str] = set()
-
-        for r in top_results:
-            seen_article_ids.add(r.article_id)
-            article = self._article_by_id.get(r.article_id)
-            if article is None:
-                continue
-            for ref in article.references:
-                ref_id = ref.get("id")
-                if ref_id and ref_id not in seen_article_ids:
-                    referenced_article_ids.add(ref_id)
-
-        if not referenced_article_ids:
-            return []
-
-        # Limit expansion size
-        ref_ids = list(referenced_article_ids)[:self.expansion_max_articles]
-
-        expanded: list[RetrievalResult] = []
-        for ref_id in ref_ids:
-            ref_chunks = self.vector_store.get_by_article(ref_id)
-            for rc in ref_chunks:
-                meta = rc.get("metadata", {})
-                # Score based on graph boost (no vector similarity available)
-                expanded.append(RetrievalResult(
-                    chunk_id=rc["chunk_id"],
-                    content=rc.get("content", ""),
-                    raw_content="",
-                    article_id=ref_id,
-                    unit_type=meta.get("unit_type", "ARTICLE"),
-                    order=meta.get("order", 0),
-                    hierarchy_path=meta.get("hierarchy_path", ""),
-                    score=self.graph_boost,
-                    source="graph_expansion",
-                    metadata=meta,
-                ))
-
-        return expanded
-
-    # -- merge ---------------------------------------------------------------
-
-    @staticmethod
-    def _merge_results(
-        vector_results: list[RetrievalResult],
-        graph_results: list[RetrievalResult],
-    ) -> list[RetrievalResult]:
-        """Merge vector and graph results, deduplicating by chunk_id."""
-        seen: set[str] = set()
-        merged: list[RetrievalResult] = []
-
-        for r in vector_results + graph_results:
-            if r.chunk_id not in seen:
-                seen.add(r.chunk_id)
-                merged.append(r)
-            else:
-                # If already present (from vector search), boost score
-                for existing in merged:
-                    if existing.chunk_id == r.chunk_id:
-                        existing.score = min(existing.score + 0.05, 1.0)
-                        break
-
-        return merged
-
     # -- BM25 fusion ---------------------------------------------------------
 
     def _fuse_bm25(
@@ -280,22 +193,30 @@ class Retriever:
         bm25_results: list[dict],
         pool_size: int,
     ) -> list[dict]:
-        """Fuse BM25 sparse scores with vector similarity scores.
+        """Dispatch BM25 fusion based on self.fusion_method."""
+        if self.fusion_method == "rrf":
+            return self._fuse_bm25_rrf(vector_results, bm25_results, pool_size)
+        return self._fuse_bm25_weighted(vector_results, bm25_results, pool_size)
 
-        Strategy: For chunks that appear in both result sets, blend scores
+    def _fuse_bm25_weighted(
+        self,
+        vector_results: list[dict],
+        bm25_results: list[dict],
+        pool_size: int,
+    ) -> list[dict]:
+        """Fuse BM25 sparse scores with vector similarity scores using weighted blend.
+
+        For chunks that appear in both result sets, blend scores
         using weighted average. For chunks only in one set, keep that score
         (slightly penalized). The result list is trimmed to pool_size.
         """
-        # Build lookup of BM25 scores by chunk_id
         bm25_by_id: dict[str, float] = {
             r["chunk_id"]: r["bm25_score"] for r in bm25_results
         }
 
-        # Blend BM25 scores into vector results
         for vr in vector_results:
             cid = vr.get("chunk_id", "")
             if cid in bm25_by_id:
-                # Weighted blend: vector dominates, BM25 boosts exact matches
                 vec_sim = vr.get("similarity", 0.0)
                 bm25_s = bm25_by_id[cid]
                 vr["similarity"] = (
@@ -303,23 +224,81 @@ class Retriever:
                     + self.bm25_weight * bm25_s
                 )
 
-        # Add BM25-only results that aren't in vector results
         existing_ids = {r.get("chunk_id", "") for r in vector_results}
         for br in bm25_results:
             if br["chunk_id"] not in existing_ids:
+                meta = dict(br.get("metadata", {}))
+                meta.setdefault("article_id", br.get("article_id", ""))
+                meta.setdefault("unit_type", br.get("unit_type", "ARTICLE"))
+                meta.setdefault("order", 0)
+                meta.setdefault("hierarchy_path", "")
                 vector_results.append({
                     "chunk_id": br["chunk_id"],
                     "content": br["content"],
-                    "metadata": {
-                        "article_id": br.get("article_id", ""),
-                        "unit_type": br.get("unit_type", "ARTICLE"),
-                        "order": 0,
-                        "hierarchy_path": "",
-                    },
+                    "metadata": meta,
                     "similarity": br["bm25_score"] * self.bm25_weight,
                     "distance": 1.0 - br["bm25_score"],
                 })
 
-        # Sort by blended similarity, trim
         vector_results.sort(key=lambda r: r.get("similarity", 0.0), reverse=True)
         return vector_results[:pool_size]
+
+    def _fuse_bm25_rrf(
+        self,
+        vector_results: list[dict],
+        bm25_results: list[dict],
+        pool_size: int,
+    ) -> list[dict]:
+        """Fuse BM25 and vector results using Reciprocal Rank Fusion.
+
+        RRF score = rrf_vector_weight * 1/(rrf_k + rank_v)
+                   + rrf_bm25_weight * 1/(rrf_k + rank_b)
+
+        where rank_v is the 1-indexed rank in vector results,
+        rank_b is the 1-indexed rank in BM25 results.
+        """
+        k = self.rrf_k
+        w_v = self.rrf_vector_weight
+        w_b = self.rrf_bm25_weight
+
+        # Build rank lookups (1-indexed)
+        vec_ranks: dict[str, int] = {
+            r["chunk_id"]: i + 1 for i, r in enumerate(vector_results)
+        }
+        bm25_ranks: dict[str, int] = {
+            r["chunk_id"]: i + 1 for i, r in enumerate(bm25_results)
+        }
+
+        all_ids = set(vec_ranks) | set(bm25_ranks)
+        fused: list[dict] = []
+        for cid in all_ids:
+            rrf_score = 0.0
+            if cid in vec_ranks:
+                rrf_score += w_v / (k + vec_ranks[cid])
+            if cid in bm25_ranks:
+                rrf_score += w_b / (k + bm25_ranks[cid])
+
+            # Get metadata from whichever source has it
+            src = next(
+                (r for r in vector_results if r.get("chunk_id") == cid),
+                next(
+                    (r for r in bm25_results if r.get("chunk_id") == cid),
+                    {},
+                ),
+            )
+            meta = dict(src.get("metadata", {}))
+            meta.setdefault("article_id", src.get("article_id", ""))
+            meta.setdefault("unit_type", src.get("unit_type", "ARTICLE"))
+            meta.setdefault("order", 0)
+            meta.setdefault("hierarchy_path", "")
+
+            fused.append({
+                "chunk_id": cid,
+                "content": src.get("content", ""),
+                "metadata": meta,
+                "similarity": rrf_score,
+                "distance": 1.0 - rrf_score,
+            })
+
+        fused.sort(key=lambda r: r.get("similarity", 0.0), reverse=True)
+        return fused[:pool_size]

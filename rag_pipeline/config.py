@@ -76,6 +76,14 @@ class BM25Config:
     fusion_weight: float = 0.5
     index_path: str = "./chroma_db/bm25_index.pkl"
 
+    # Fusion method: "weighted" (weighted score blend) or "rrf" (reciprocal rank fusion)
+    fusion_method: str = "weighted"
+
+    # RRF parameters (used when fusion_method = "rrf")
+    rrf_k: int = 60
+    rrf_vector_weight: float = 1.0
+    rrf_bm25_weight: float = 1.0
+
 
 @dataclass
 class RetrievalConfig:
@@ -85,11 +93,19 @@ class RetrievalConfig:
     candidate_pool_size: int = 50
     similarity_threshold: float = 0.3
     enable_metadata_filtering: bool = True
-    enable_graph_expansion: bool = True
-    expansion_max_articles: int = 5
     vector_weight: float = 0.7
     metadata_boost: float = 0.2
-    graph_boost: float = 0.1
+
+
+@dataclass
+class ConditionalRerankerConfig:
+    """Controls when the API reranker should be called."""
+
+    enabled: bool = False
+    strategy: str = "top1_top2_gap"
+    top1_top2_gap: float = 0.03
+    top1_top10_gap: float = 0.08
+    min_candidates: int = 2
 
 
 @dataclass
@@ -103,6 +119,23 @@ class BGERerankerConfig:
     top_n: int = 30
     timeout_sec: int = 60
     blend_weight: float = 1.0
+    conditional: ConditionalRerankerConfig = field(default_factory=ConditionalRerankerConfig)
+
+
+@dataclass
+class LLMRerankerConfig:
+    """LLM API reranker parameters (Gemma selects best among top candidates)."""
+
+    model: str = "gemma-4-31B-it"
+    endpoint: str = "/v1/chat/completions"
+    max_candidates: int = 3
+    top_n: int = 3
+    temperature: float = 0.0
+    max_output_tokens: int = 48
+    max_candidate_chars: int = 1000
+    blend_weight: float = 1.0
+    timeout_sec: int = 60
+    conditional: ConditionalRerankerConfig = field(default_factory=ConditionalRerankerConfig)
 
 
 @dataclass
@@ -110,7 +143,9 @@ class RerankerConfig:
     """Reranker parameters (Section 11 of Pipeline.md)."""
 
     enabled: bool = False
+    mode: str = "bge_api"  # "bge_api" or "llm_api"
     bge: BGERerankerConfig = field(default_factory=BGERerankerConfig)
+    llm: LLMRerankerConfig = field(default_factory=LLMRerankerConfig)
 
 
 @dataclass
@@ -172,9 +207,13 @@ class Config:
         emb_raw = raw.get("embedding", {})
         emb_api_raw = emb_raw.pop("api", {}) if isinstance(emb_raw, dict) else {}
         ctx_raw = raw.get("context", {})
-        llm_raw = ctx_raw.pop("llm", {}) if isinstance(ctx_raw, dict) else {}
+        ctx_llm_raw = ctx_raw.pop("llm", {}) if isinstance(ctx_raw, dict) else {}
         reranker_raw = raw.get("reranker", {})
+        reranker_mode = reranker_raw.get("mode", "bge_api") if isinstance(reranker_raw, dict) else "bge_api"
         bge_raw = reranker_raw.pop("bge", {}) if isinstance(reranker_raw, dict) else {}
+        reranker_llm_raw = reranker_raw.pop("llm", {}) if isinstance(reranker_raw, dict) else {}
+        conditional_raw = bge_raw.pop("conditional", {}) if isinstance(bge_raw, dict) else {}
+        llm_conditional_raw = reranker_llm_raw.pop("conditional", {}) if isinstance(reranker_llm_raw, dict) else {}
 
         # Shared API config (base_url + api_key)
         shared_api = raw.get("api", {})
@@ -199,6 +238,7 @@ class Config:
             retrieval=RetrievalConfig(**raw.get("retrieval", {})),
             reranker=RerankerConfig(
                 enabled=reranker_raw.get("enabled", False),
+                mode=reranker_mode,
                 bge=BGERerankerConfig(
                     model=bge_raw.get("model", "bge-reranker-v2-m3"),
                     api_key=_resolve_env(bge_raw.get("api_key", "${FPT_RERANKER_API_KEY}")),
@@ -207,15 +247,40 @@ class Config:
                     top_n=bge_raw.get("top_n", 30),
                     timeout_sec=bge_raw.get("timeout_sec", 60),
                     blend_weight=bge_raw.get("blend_weight", 1.0),
+                    conditional=ConditionalRerankerConfig(
+                        enabled=conditional_raw.get("enabled", False),
+                        strategy=conditional_raw.get("strategy", "top1_top2_gap"),
+                        top1_top2_gap=conditional_raw.get("top1_top2_gap", 0.03),
+                        top1_top10_gap=conditional_raw.get("top1_top10_gap", 0.08),
+                        min_candidates=conditional_raw.get("min_candidates", 2),
+                    ),
+                ),
+                llm=LLMRerankerConfig(
+                    model=reranker_llm_raw.get("model", "gemma-4-31B-it"),
+                    endpoint=reranker_llm_raw.get("endpoint", "/v1/chat/completions"),
+                    max_candidates=reranker_llm_raw.get("max_candidates", 3),
+                    top_n=reranker_llm_raw.get("top_n", 3),
+                    temperature=reranker_llm_raw.get("temperature", 0.0),
+                    max_output_tokens=reranker_llm_raw.get("max_output_tokens", 48),
+                    max_candidate_chars=reranker_llm_raw.get("max_candidate_chars", 1000),
+                    blend_weight=reranker_llm_raw.get("blend_weight", 1.0),
+                    timeout_sec=reranker_llm_raw.get("timeout_sec", 60),
+                    conditional=ConditionalRerankerConfig(
+                        enabled=llm_conditional_raw.get("enabled", False),
+                        strategy=llm_conditional_raw.get("strategy", "top1_top2_gap"),
+                        top1_top2_gap=llm_conditional_raw.get("top1_top2_gap", 0.03),
+                        top1_top10_gap=llm_conditional_raw.get("top1_top10_gap", 0.08),
+                        min_candidates=llm_conditional_raw.get("min_candidates", 2),
+                    ),
                 ),
             ),
             context=ContextConfig(
                 **ctx_raw,
                 llm=LLMConfig(
-                    model=llm_raw.get("model", "gemma-4-31B-it"),
-                    temperature=llm_raw.get("temperature", 0.3),
-                    max_output_tokens=llm_raw.get("max_output_tokens", 120),
-                    timeout_sec=llm_raw.get("timeout_sec", 30),
+                    model=ctx_llm_raw.get("model", "gemma-4-31B-it"),
+                    temperature=ctx_llm_raw.get("temperature", 0.3),
+                    max_output_tokens=ctx_llm_raw.get("max_output_tokens", 120),
+                    timeout_sec=ctx_llm_raw.get("timeout_sec", 30),
                 ),
             ),
             data=DataConfig(**raw.get("data", {})),

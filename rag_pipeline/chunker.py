@@ -16,9 +16,9 @@ After chunking:
 import re
 import pickle as _pickle
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path as _Path
-from typing import Callable, Optional
+from typing import Callable
 
 from data_loader import Article
 
@@ -486,10 +486,9 @@ class Chunker:
         for i, ch in enumerate(chunks, start=1):
             ch.order = i
 
-    @staticmethod
-    def _any_too_large(texts: list[str]) -> bool:
-        """Return True if any text in the list exceeds max_tokens."""
-        return any(estimate_tokens(t) > 512 for t in texts)
+    def _any_too_large(self, texts: list[str]) -> bool:
+        """Return True if any text in the list exceeds the configured max token limit."""
+        return any(self.token_counter(t) > self.max_tokens for t in texts)
 
 
 # ---------------------------------------------------------------------------

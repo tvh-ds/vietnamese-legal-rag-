@@ -1,6 +1,6 @@
 # Vietnamese Legal RAG — Chunking + Retrieval Pipeline
 
-A production-ready pipeline for chunking Vietnamese legal documents (VBQPPL), generating embeddings, and performing hybrid retrieval (dense + BM25 + BGE reranker) for RAG-powered legal Q&A. Implements the specification in [`Pipeline.md`](Pipeline.md).
+A production-ready pipeline for chunking Vietnamese legal documents (VBQPPL), generating embeddings, and performing hybrid retrieval (dense + BM25 + BGE reranker) for RAG-powered legal Q&A.
 
 ---
 
@@ -63,7 +63,6 @@ python rag_pipeline/main.py -c rag_pipeline/config.yaml search "thủ tục đ�
 
 ```
 .
-├── Pipeline.md                         # Full pipeline specification
 ├── README.md
 ├── REPORT.md                           # Latest benchmark results
 ├── data/                               # Input JSON files (your data)
@@ -136,27 +135,27 @@ data:
 
 ## Full pipeline — phase by phase
 
-| Phase | File | What happens |
-|-------|------|-------------|
-| **1. Structure parsing** | `data_loader.py` | JSON walker — flattens topic → section → chapter → article hierarchy. Extracts metadata, cross-references, and benchmark IDs via content matching. |
-| **2. Recursive chunking** | `chunker.py` | Recursive Clause → Point → Paragraph → Sentence splitting. Merge short chunks, deduplicate, preserve sentence boundaries. Overlap tokens prevent boundary cuts. |
-| **3. Context injection** | `context_generator.py` | 60–120 token Vietnamese legal summary generated per article (LLM or heuristic fallback), prepended to every chunk before embedding. |
-| **4. Embedding** | `embedder.py` | Company `Vietnamese_Embedding` API (1024-dim) or local `sentence-transformers`. Batched 64/chunk. 3-retry exponential backoff. |
-| **5. Vector store** | `vector_store.py` | ChromaDB — persistent, cosine-distance, HNSW-indexed. |
-| **6. BM25 index** | `bm25_retriever.py` | Okapi BM25 with pyvi Vietnamese word segmentation (`k1=1.2`, `b=0.75`). Index persisted alongside ChromaDB. |
-| **7. Retrieval** | `retriever.py` | Hybrid: vector cosine + BM25 sparse → fusion → reranker → top-10. |
-| **8. Benchmarking** | `benchmark.py` | Recall@1 / @3 / @10 on 1,238 questions. |
+| Phase                           | File                     | What happens                                                                                                                                                       |
+| ------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **1. Structure parsing**  | `data_loader.py`       | JSON walker — flattens topic → section → chapter → article hierarchy. Extracts metadata, cross-references, and benchmark IDs via content matching.             |
+| **2. Recursive chunking** | `chunker.py`           | Recursive Clause → Point → Paragraph → Sentence splitting. Merge short chunks, deduplicate, preserve sentence boundaries. Overlap tokens prevent boundary cuts. |
+| **3. Context injection**  | `context_generator.py` | 60–120 token Vietnamese legal summary generated per article (LLM or heuristic fallback), prepended to every chunk before embedding.                               |
+| **4. Embedding**          | `embedder.py`          | Company`Vietnamese_Embedding` API (1024-dim) or local `sentence-transformers`. Batched 64/chunk. 3-retry exponential backoff.                                  |
+| **5. Vector store**       | `vector_store.py`      | ChromaDB — persistent, cosine-distance, HNSW-indexed.                                                                                                             |
+| **6. BM25 index**         | `bm25_retriever.py`    | Okapi BM25 with pyvi Vietnamese word segmentation (`k1=1.2`, `b=0.75`). Index persisted alongside ChromaDB.                                                    |
+| **7. Retrieval**          | `retriever.py`         | Hybrid: vector cosine + BM25 sparse → fusion → reranker → top-10.                                                                                               |
+| **8. Benchmarking**       | `benchmark.py`         | Recall@1 / @3 / @10 on 1,238 questions.                                                                                                                            |
 
 ### Retrieval (Phase 7 — per query)
 
-| Stage | What happens |
-|-------|-------------|
-| **Query rewriting** | Expands abbreviations, appends legal-domain context for short queries |
-| **Vector search** | Cosine similarity top-50 via ChromaDB |
-| **BM25 search** | Okapi BM25 top-50 via rank-bm25 |
-| **Score fusion** | `(1 - fusion_weight) × vector + fusion_weight × BM25` (tuned at `0.05`) |
-| **BGE reranker** | `POST /v1/rerank` — sorts by BGE relevance score with optional blend of hybrid score |
-| **Final top-k** | Returns 10 highest-scoring chunks |
+| Stage                     | What happens                                                                            |
+| ------------------------- | --------------------------------------------------------------------------------------- |
+| **Query rewriting** | Expands abbreviations, appends legal-domain context for short queries                   |
+| **Vector search**   | Cosine similarity top-50 via ChromaDB                                                   |
+| **BM25 search**     | Okapi BM25 top-50 via rank-bm25                                                         |
+| **Score fusion**    | `(1 - fusion_weight) × vector + fusion_weight × BM25` (tuned at `0.05`)           |
+| **BGE reranker**    | `POST /v1/rerank` — sorts by BGE relevance score with optional blend of hybrid score |
+| **Final top-k**     | Returns 10 highest-scoring chunks                                                       |
 
 ### Benchmarking (Phase 8)
 
@@ -172,34 +171,44 @@ Key tunable parameters in `config.yaml`:
 
 ### `reranker.bge`
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `enabled` | `true` | Enable API BGE reranking |
-| `model` | `bge-reranker-v2-m3` | Reranker model name |
-| `api_key` | `${FPT_RERANKER_API_KEY}` | Separate key from embedding |
-| `endpoint` | `/v1/rerank` | API endpoint path (uses shared `api.base_url`) |
-| `max_candidates` | `50` | Candidates sent to the reranker per query |
-| `top_n` | `50` | Results returned by the API |
-| `blend_weight` | `1.0` | 1.0 = pure BGE score; 0.8 = 80% BGE + 20% hybrid |
+| Key                | Default                     | Description                                     |
+| ------------------ | --------------------------- | ----------------------------------------------- |
+| `enabled`        | `true`                    | Enable API BGE reranking                        |
+| `model`          | `bge-reranker-v2-m3`      | Reranker model name                             |
+| `api_key`        | `${FPT_RERANKER_API_KEY}` | Separate key from embedding                     |
+| `endpoint`       | `/v1/rerank`              | API endpoint path (uses shared`api.base_url`) |
+| `max_candidates` | `10`                      | Candidates sent to the reranker per query       |
+| `top_n`          | `10`                      | Results returned by the API                     |
+| `blend_weight`   | `0.05`                    | Small BGE correction blended with hybrid score  |
+
+### `reranker.bge.conditional`
+
+Conditional reranking skips BGE when hybrid retrieval is already confident. This reduces API calls and avoids unnecessary reranker noise.
+
+| Key                | Current           | Description                                           |
+| ------------------ | ----------------- | ----------------------------------------------------- |
+| `enabled`        | `true`          | Enable score-gap based conditional reranking          |
+| `strategy`       | `top1_top2_gap` | Rerank only when rank 1 and rank 2 are close          |
+| `top1_top2_gap`  | `0.03`          | Call BGE when`score_1 - score_2 < threshold`        |
+| `top1_top10_gap` | `0.08`          | Alternative threshold for`strategy: top1_top10_gap` |
+| `min_candidates` | `2`             | Minimum candidates required for conditional decision  |
 
 ### `bm25`
 
-| Key | Current | Description |
-|-----|---------|-------------|
-| `k1` | `1.2` | Term frequency saturation |
-| `b` | `0.75` | Document length normalization |
+| Key               | Current  | Description                                            |
+| ----------------- | -------- | ------------------------------------------------------ |
+| `k1`            | `1.2`  | Term frequency saturation                              |
+| `b`             | `0.75` | Document length normalization                          |
 | `fusion_weight` | `0.05` | BM25 weight in hybrid (0 = pure vector, 1 = pure BM25) |
-| `top_k` | `50` | Candidates from BM25 retrieval |
+| `top_k`         | `50`   | Candidates from BM25 retrieval                         |
 
 ### `retrieval`
 
-| Key | Current | Description |
-|-----|---------|-------------|
-| `candidate_pool_size` | `50` | Pool size before reranking |
-| `top_k` | `10` | Final results per query |
+| Key                           | Current   | Description                             |
+| ----------------------------- | --------- | --------------------------------------- |
+| `candidate_pool_size`       | `50`    | Pool size before reranking              |
+| `top_k`                     | `10`    | Final results per query                 |
 | `enable_metadata_filtering` | `false` | Metadata post-filtering (status, topic) |
-| `enable_graph_expansion` | `false` | Article cross-reference expansion |
-
 Full reference: comments in `config.yaml`.
 
 ---
@@ -215,16 +224,18 @@ Content-Type: application/json
 ```
 
 **Request:**
+
 ```json
 {
   "model": "bge-reranker-v2-m3",
   "query": "question text",
   "documents": ["chunk content 1", "chunk content 2"],
-  "top_n": 50
+  "top_n": 10
 }
 ```
 
 **Response:**
+
 ```json
 {
   "results": [
@@ -240,17 +251,17 @@ Also supports `{"scores": [...]}`, `{"data": [{"index": ..., "score": ...}]}`.
 
 ## Chunk output schema
 
-| Field | Type | Example |
-|-------|------|---------|
-| `chunk_id` | UUID | `017eb4cf-...` |
-| `article_id` | str | `D45AE0D8-...` |
-| `unit_type` | enum | `ARTICLE` / `CLAUSE` / `POINT` |
-| `content` | str | `"Điều: Nguyên tắc bầu cử.\n..."` |
-| `token_count` | int | `87` |
-| `hierarchy_path` | str | `article_id/clause_1/point_b` |
-| `document_id` | str | `85/2015/QH13` |
-| `status` | str | `CÓ_HIỆU_LỰC_THI_HÀNH` |
-| `topic_name` | str | `Tổ chức bộ máy nhà nước` |
+| Field              | Type | Example                                   |
+| ------------------ | ---- | ----------------------------------------- |
+| `chunk_id`       | UUID | `017eb4cf-...`                          |
+| `article_id`     | str  | `D45AE0D8-...`                          |
+| `unit_type`      | enum | `ARTICLE` / `CLAUSE` / `POINT`      |
+| `content`        | str  | `"Điều: Nguyên tắc bầu cử.\n..."` |
+| `token_count`    | int  | `87`                                    |
+| `hierarchy_path` | str  | `article_id/clause_1/point_b`           |
+| `document_id`    | str  | `85/2015/QH13`                          |
+| `status`         | str  | `CÓ_HIỆU_LỰC_THI_HÀNH`              |
+| `topic_name`     | str  | `Tổ chức bộ máy nhà nước`        |
 
 ---
 

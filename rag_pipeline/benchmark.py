@@ -31,7 +31,7 @@ from embedder import create_embedder
 from vector_store import VectorStore
 from retriever import Retriever
 from query_rewriter import QueryRewriter
-from reranker import Reranker
+from reranker import Reranker, LLMReranker
 from bm25_retriever import BM25Retriever
 
 logger = logging.getLogger("benchmark")
@@ -76,34 +76,60 @@ class Benchmark:
 
         reranker = None
         if self.config.reranker.enabled:
-            reranker = Reranker(
-                base_url=getattr(self.config, "_api_base_url", ""),
-                api_key=self.config.reranker.bge.api_key,
-                model=self.config.reranker.bge.model,
-                endpoint=self.config.reranker.bge.endpoint,
-                max_candidates=self.config.reranker.bge.max_candidates,
-                top_n=self.config.reranker.bge.top_n,
-                timeout_sec=self.config.reranker.bge.timeout_sec,
-                blend_weight=self.config.reranker.bge.blend_weight,
-            )
+            if self.config.reranker.mode == "llm_api":
+                reranker = LLMReranker(
+                    base_url=getattr(self.config, "_api_base_url", ""),
+                    api_key=getattr(self.config, "_api_key", ""),
+                    model=self.config.reranker.llm.model,
+                    endpoint=self.config.reranker.llm.endpoint,
+                    max_candidates=self.config.reranker.llm.max_candidates,
+                    top_n=self.config.reranker.llm.top_n,
+                    temperature=self.config.reranker.llm.temperature,
+                    max_output_tokens=self.config.reranker.llm.max_output_tokens,
+                    max_candidate_chars=self.config.reranker.llm.max_candidate_chars,
+                    blend_weight=self.config.reranker.llm.blend_weight,
+                    timeout_sec=self.config.reranker.llm.timeout_sec,
+                    conditional_enabled=self.config.reranker.llm.conditional.enabled,
+                    conditional_strategy=self.config.reranker.llm.conditional.strategy,
+                    conditional_top1_top2_gap=self.config.reranker.llm.conditional.top1_top2_gap,
+                    conditional_top1_top10_gap=self.config.reranker.llm.conditional.top1_top10_gap,
+                    conditional_min_candidates=self.config.reranker.llm.conditional.min_candidates,
+                )
+            else:
+                reranker = Reranker(
+                    base_url=getattr(self.config, "_api_base_url", ""),
+                    api_key=self.config.reranker.bge.api_key,
+                    model=self.config.reranker.bge.model,
+                    endpoint=self.config.reranker.bge.endpoint,
+                    max_candidates=self.config.reranker.bge.max_candidates,
+                    top_n=self.config.reranker.bge.top_n,
+                    timeout_sec=self.config.reranker.bge.timeout_sec,
+                    blend_weight=self.config.reranker.bge.blend_weight,
+                    conditional_enabled=self.config.reranker.bge.conditional.enabled,
+                    conditional_strategy=self.config.reranker.bge.conditional.strategy,
+                    conditional_top1_top2_gap=self.config.reranker.bge.conditional.top1_top2_gap,
+                    conditional_top1_top10_gap=self.config.reranker.bge.conditional.top1_top10_gap,
+                    conditional_min_candidates=self.config.reranker.bge.conditional.min_candidates,
+                )
 
         retriever = Retriever(
             embedder=embedder,
             vector_store=store,
-            articles=articles,
             top_k=self.config.retrieval.top_k,
             candidate_pool_size=self.config.retrieval.candidate_pool_size,
             similarity_threshold=self.config.retrieval.similarity_threshold,
             enable_metadata_filtering=self.config.retrieval.enable_metadata_filtering,
-            enable_graph_expansion=False,
             vector_weight=self.config.retrieval.vector_weight,
             metadata_boost=self.config.retrieval.metadata_boost,
-            graph_boost=0.0,
             prefer_active=self.config.metadata.prefer_active,
             topic_boost=self.config.metadata.topic_boost,
             reranker=reranker,
             bm25_retriever=bm25,
             bm25_weight=self.config.bm25.fusion_weight,
+            fusion_method=self.config.bm25.fusion_method,
+            rrf_k=self.config.bm25.rrf_k,
+            rrf_vector_weight=self.config.bm25.rrf_vector_weight,
+            rrf_bm25_weight=self.config.bm25.rrf_bm25_weight,
         )
 
         # 4. Pre-embed all queries (one API batch — fast + retry-safe)
@@ -178,9 +204,13 @@ class Benchmark:
         print(f"Recall@1:  {recall_at_1:.4f}  ({hits_at_1}/{len(questions)})")
         print(f"Recall@3:  {recall_at_3:.4f}  ({hits_at_3}/{len(questions)})")
         print(f"Recall@10: {recall_at_10:.4f}  ({hits_at_10}/{len(questions)})")
+        if reranker is not None:
+            print(f"Reranker calls attempted: {reranker.calls_attempted}")
+            print(f"Reranker calls skipped:   {reranker.calls_skipped}")
+            print(f"Reranker calls failed:    {reranker.calls_failed}")
         print(f"{'=' * 40}")
 
-        return {
+        result = {
             "recall_at_1": recall_at_1,
             "recall_at_3": recall_at_3,
             "recall_at_10": recall_at_10,
@@ -191,6 +221,13 @@ class Benchmark:
             "hits": hits_at_10,
             "per_question": per_question,
         }
+        if reranker is not None:
+            result.update({
+                "reranker_calls_attempted": reranker.calls_attempted,
+                "reranker_calls_skipped": reranker.calls_skipped,
+                "reranker_calls_failed": reranker.calls_failed,
+            })
+        return result
 
     # -- indexing ------------------------------------------------------------
 
@@ -213,6 +250,32 @@ class Benchmark:
             bm25 = None
             if self.config.bm25.enabled:
                 bm25 = BM25Retriever.load(store_path + "/bm25_index.pkl")
+                if bm25 is not None and not bm25.has_benchmark_metadata():
+                    print("  [rebuild] BM25 index missing metadata — rebuilding from chunks cache…")
+                    import pickle as _pickle
+                    cache_path = Path("chunks_cache.pkl")
+                    if cache_path.exists():
+                        with open(cache_path, "rb") as f:
+                            chunks = _pickle.load(f)
+                    else:
+                        from chunker import chunk_articles, set_tokenizer_model
+                        set_tokenizer_model(self.config.embedding.model_name)
+                        chunks = chunk_articles(
+                            articles,
+                            max_tokens=self.config.chunking.max_tokens,
+                            min_tokens=self.config.chunking.min_tokens,
+                            overlap_tokens=self.config.chunking.overlap_tokens,
+                            enable_context=self.config.context.enabled,
+                            max_context_tokens=self.config.context.max_context_tokens,
+                        )
+                    bm25 = BM25Retriever(
+                        k1=self.config.bm25.k1,
+                        b=self.config.bm25.b,
+                        top_k=self.config.bm25.top_k,
+                    )
+                    bm25.build_index(chunks)
+                    bm25.save(store_path + "/bm25_index.pkl")
+                    print(f"  [rebuild] BM25 index rebuilt ({len(chunks)} chunks)")
             return store, bm25, articles
 
         # 1. Load with benchmark IDs

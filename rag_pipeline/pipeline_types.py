@@ -17,5 +17,5 @@ class RetrievalResult:
     order: int
     hierarchy_path: str
     score: float                   # Combined score (0.0 – 1.0, higher is better)
-    source: str                    # "vector" | "graph_expansion"
+    source: str                    # "vector"
     metadata: dict

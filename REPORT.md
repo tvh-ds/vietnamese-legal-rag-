@@ -1,281 +1,327 @@
-# Vietnamese Legal RAG — Pipeline Report
+# Báo Cáo Tiến Độ Hệ Thống Truy Hồi Văn Bản Pháp Luật Tiếng Việt
 
-## Dataset
-
-| Property | Value |
-|----------|-------|
-| Source | 45 JSON files (`chu_de_1.json` … `chu_de_45.json`) |
-| Format | VBQPPL parsed: topic → section → chapter → article |
-| Total articles | **76,459** |
-| Articles with benchmark IDs | **32,768** (content-matched via `Correct ID.json`) |
-| Benchmark questions | 1,238 (from `1238_question_map_phap_dien.json`) |
-| Unique relevant law IDs | 1,325 |
+Trọng tâm: Hybrid Search và Reranker
 
 ---
 
-## Result
+## 1. Tóm Tắt Kết Quả
 
-| Metric | Value |
-|--------|-------|
-| **Recall@10** | **0.9257** (1,146 / 1,238) |
-| LLM context injection | Disabled (heuristic: title + first sentence) |
+- Hybrid search (dense vector + BM25) là baseline mạnh nhất hiện tại.
+- BGE reranker cải thiện ít
+- Kết quả tốt nhất hiện tại:
 
----
-
-## Pipeline Architecture
-
-### Phase 1 — Structure Parsing
-
-| Component | Tool | Details |
-|-----------|------|---------|
-| Data loader | `data_loader.py` | Flattens topic→section→chapter→article hierarchy |
-| Benchmark ID mapping | Content matching | `Correct ID.json` dict: `article_text → numeric_id` |
-| ID match rate | 32,768 / 76,459 | All 1,325 benchmark-relevant IDs covered |
-
-**Extracted metadata per article:**
-
-| Field | Source |
-|-------|--------|
-| `article_id` (UUID) | `Điều ID` |
-| `title` | `Tên điều` |
-| `content` | `Nội dung` |
-| `document_id` | Regex from `Ghi chú` text |
-| `document_type` | `Luật` / `Nghị định` / `Thông tư` |
-| `effective_date` | `metadata[Hiệu lực]` |
-| `status` | `metadata[Thi hành]` |
-| `topic_id`, `topic_name` | Topic hierarchy |
-| `benchmark_id` | Content-matched from `Correct ID.json` |
+| Phương pháp                | R@1              | R@3              |             R@10 |
+| ----------------------------- | ---------------- | ---------------- | ---------------: |
+| Hybrid search không reranker | **0.7924** | **0.9273** | **0.9717** |
+| Hybrid search + BGE reranker  | **0.7981** | **0.9346** | **0.9725** |
 
 ---
 
-### Phase 2 — Recursive Semantic Chunking
+## 2. Tổng Quan Pipeline Hiện Tại
 
-| Component | Tool | Details |
-|-----------|------|---------|
-| Tokenizer | HuggingFace `AutoTokenizer` | Matches embedding model for accurate counts |
-| Chunking algorithm | `chunker.py` | Recursive Clause → Point → Paragraph → Sentence |
-| Clause pattern | Regex `^\d+\.\s` | Numbered clauses (Khoản) |
-| Point pattern | Regex `^[a-đ]\)\s` | Lettered points (Điểm) |
-| Paragraph split | Double-newline boundary | Late chunking fallback |
-| Sentence split | Vietnamese sentence boundaries | Final fallback |
-
-**Chunking parameters:**
-
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| `max_tokens` | 1,024 | Split threshold |
-| `min_tokens` | 30 | Merge shorter chunks with adjacent |
-| `overlap_tokens` | 50 | Token overlap at chunk boundaries |
-| Chunk cache | `chunks_cache.pkl` | Disk-persisted for instant reload |
-
-**Chunk unit types:** ARTICLE, CLAUSE, POINT, PARAGRAPH, SENTENCE
-
-**Chunk output fields (stored in ChromaDB):**
-
-| Field | Type | Embedded? |
-|-------|------|-----------|
-| `content` (context + raw) | text | ✅ Yes |
-| `chunk_id` | UUID | ❌ Metadata |
-| `article_id` | UUID | ❌ Metadata |
-| `unit_type` | enum | ❌ Metadata |
-| `hierarchy_path` | string | ❌ Metadata |
-| `document_id`, `document_type` | string | ❌ Metadata |
-| `effective_date`, `status` | string | ❌ Metadata |
-| `topic_id`, `topic_name` | string | ❌ Metadata |
-| `benchmark_id` | string | ❌ Metadata (evaluation only) |
+| Bước             | Phương pháp đang dùng                                             | Ghi chú                                       |
+| ------------------ | ---------------------------------------------------------------------- | ---------------------------------------------- |
+| Nạp dữ liệu     | Đọc JSON pháp điển đã parse                                     | Dữ liệu văn bản pháp luật tiếng Việt   |
+| Chunking           | Chia văn bản theo cấu trúc điều/khoản/điểm + giới hạn token | `max_tokens=512`, `overlap_tokens=50`     |
+| Context generation | Context heuristic, không dùng LLM                                    | `context.enabled=true`, `use_llm=false`    |
+| Embedding          | API embedding tiếng Việt                                             | Model`Vietnamese_Embedding`, 1024 chiều     |
+| Vector store       | ChromaDB                                                               | Lưu vector embedding và thông tin chunk     |
+| Dense retrieval    | Vector search theo cosine similarity                                   | `candidate_pool_size=50`                     |
+| Sparse retrieval   | BM25                                                                   | `k1=1.2`, `b=0.75`, `top_k=50`           |
+| Fusion             | Weighted score fusion                                                  | BM25 weight`0.05`                            |
+| Reranking          | BGE reranker API, tùy cấu hình                                      | Dùng trong cấu hình tốt nhất có reranker |
+| Evaluation         | Recall@1, Recall@3, Recall@10                                          | Benchmark trên 1.238 câu hỏi                |
 
 ---
 
-### Phase 3 — Context Generation
+## 3. Dataset
 
-| Component | Tool | Details |
-|-----------|------|---------|
-| Method | Heuristic | Article title + first sentence |
-| LLM option | `gemma-4-31B-it` via API | Disabled for this run (`use_llm: false`) |
-| Per-chunk prepend | `[context] + [chunk_content]` | Injected before embedding |
-
----
-
-### Phase 4 — Embedding
-
-| Component | Tool | Details |
-|-----------|------|---------|
-| Backend | Company API (`requests`) | `POST /v1/embeddings` |
-| Model | **Vietnamese_Embedding** | 1024-dim vectors |
-| Base URL | `https://mkp-api.fptcloud.com` | OpenAI-compatible endpoint |
-| Authentication | Bearer token | `$FPT_API_KEY` environment variable |
-| Max sequence length | 2,048 tokens | Input chunks ≤ 1,024 fit comfortably |
-| Batch size | 64 texts per API call | |
-| Retry logic | 3 attempts, exponential backoff | Handles transient network failures |
-| Progress | `tqdm` progress bar | Per-batch tracking |
-
-**Embedding isolation:** The `benchmark_id` field is stored in ChromaDB metadata only. The embedding model never receives it. Retrieval never uses it. It is only read at the final evaluation step to compute Recall@10.
+| Thuộc tính                   | Giá trị                                                  |
+| ------------------------------ | ---------------------------------------------------------- |
+| Nguồn dữ liệu               | 45 file JSON (`chu_de_1.json` … `chu_de_45.json`)     |
+| Định dạng                   | VBQPPL đã parse: topic → section → chapter → article  |
+| Tổng số điều               | **76.459**                                           |
+| Số điều có benchmark ID    | **32.768** (khớp nội dung qua `Correct ID.json`) |
+| Số câu hỏi benchmark        | 1.238 (từ`1238_question_map_phap_dien.json`)            |
+| Số luật liên quan duy nhất | 1.325                                                      |
 
 ---
 
-### Phase 5 — Vector Storage
+## 4. Chi Tiết Từng Bước Trong Pipeline
 
-| Component | Tool | Details |
-|-----------|------|---------|
-| Database | **ChromaDB** (persistent) | SQLite + binary segment files |
-| Index type | HNSW | Approximate nearest neighbor |
-| Distance metric | Cosine | Vectors are L2-normalized |
-| Collection | `bench_data` | Stored in `chroma_db_bench/` |
+### 4.1 Nạp dữ liệu
+
+| Component            | Tool               | Chi tiết                                                                |
+| -------------------- | ------------------ | ------------------------------------------------------------------------ |
+| Data loader          | `data_loader.py` | Làm phẳng hệ thống phân cấp topic → section → chapter → article |
+| Mapping ID benchmark | Content matching   | `Correct ID.json`: `article_text → numeric_id`                      |
+| Tỉ lệ match ID     | 32.768 / 76.459    | Toàn bộ 1.325 ID benchmark được coverage                            |
+
+**Metadata được trích xuất mỗi điều:**
+
+| Trường                     | Nguồn                                 |
+| ---------------------------- | -------------------------------------- |
+| `article_id` (UUID)        | Điều ID                              |
+| `title`                    | Tên điều                            |
+| `content`                  | Nội dung                              |
+| `document_id`              | Regex từ Ghi chú                     |
+| `document_type`            | Luật / Nghị định / Thông tư      |
+| `effective_date`           | `metadata[Hiệu lực]`               |
+| `status`                   | `metadata[Thi hành]`                |
+| `topic_id`, `topic_name` | Hệ thống topic cha                   |
+| `benchmark_id`             | Content-matched từ`Correct ID.json` |
+
+### 4.2 Chunking
+
+| Component             | Tool                           | Chi tiết                                         |
+| --------------------- | ------------------------------ | ------------------------------------------------- |
+| Tokenizer             | HuggingFace`AutoTokenizer`   | Khớp với embedding model                        |
+| Thuật toán chunking | `chunker.py`                 | Đệ quy Clause → Point → Paragraph → Sentence |
+| Clause pattern        | Regex`^\d+\.\s`              | Các khoản đánh số                            |
+| Point pattern         | Regex`^[a-đ]\)\s`           | Các điểm đánh chữ                           |
+| Paragraph split       | Double-newline boundary        | Chia ngữ đoạn                                  |
+| Sentence split        | Vietnamese sentence boundaries | Fallback cuối cùng                              |
+
+**Tham số chunking:**
+
+| Parameter          | Giá trị | Mô tả                              |
+| ------------------ | --------- | ------------------------------------ |
+| `max_tokens`     | 512       | Ngưỡng chia                        |
+| `min_tokens`     | 30        | Gộp chunk nhỏ với chunk liền kề |
+| `overlap_tokens` | 50        | Token overlap tại ranh giới chunk  |
+
+**Các loại unit:** ARTICLE, CLAUSE, POINT, PARAGRAPH, SENTENCE
+
+### 4.3 Context Generation
+
+| Component            | Tool                            | Chi tiết                           |
+| -------------------- | ------------------------------- | ----------------------------------- |
+| Phương pháp       | Heuristic                       | Tên điều + câu đầu tiên      |
+| LLM option           | `gemma-4-31B-it` qua API      | Không dùng (`use_llm: false`)   |
+| Tiền tố mỗi chunk | `[context] + [chunk_content]` | Được ghép trước khi embedding |
+
+### 4.4 Embedding
+
+| Component           | Tool                             | Chi tiết                           |
+| ------------------- | -------------------------------- | ----------------------------------- |
+| Backend             | API công ty (`requests`)      | `POST /v1/embeddings`             |
+| Model               | **Vietnamese_Embedding**   | 1024 chiều                         |
+| Base URL            | `https://mkp-api.fptcloud.com` | OpenAI-compatible                   |
+| Xác thực          | Bearer token                     | Biến môi trường`$FPT_API_KEY` |
+| Max sequence length | 2.048 tokens                     | Input chunks ≤ 512                 |
+| Batch size          | 64 texts mỗi API call           |                                     |
+| Retry               | 3 lần, exponential backoff      | Xử lý lỗi mạng tạm thời       |
+
+**Cô lập embedding:** Trường `benchmark_id` chỉ lưu trong metadata ChromaDB. Model embedding không bao giờ nhận được nó. Chỉ dùng ở bước đánh giá cuối cùng.
+
+### 4.5 Vector Store
+
+| Component       | Tool                            | Chi tiết                      |
+| --------------- | ------------------------------- | ------------------------------ |
+| Database        | **ChromaDB** (persistent) | SQLite + binary segment files  |
+| Index type      | HNSW                            | Approximate nearest neighbor   |
+| Distance metric | Cosine                          | Vectors được L2-normalized  |
+| Collection      | `bench_data`                  | Lưu trong`chroma_db_bench/` |
+
+### 4.6 BM25 Sparse Index
+
+| Component      | Tool                                            | Chi tiết                     |
+| -------------- | ----------------------------------------------- | ----------------------------- |
+| Library        | **rank-bm25**                             | Okapi BM25                    |
+| Tokenizer      | **pyvi**                                  | Vietnamese word segmentation  |
+| `k1`         | 1.2                                             | Term frequency saturation     |
+| `b`          | 0.75                                            | Document length normalization |
+| Persistence    | Pickle file                                     | Lưu cạnh ChromaDB           |
+| Compound words | `đấu_giá`, `giấy_phép`, `xây_dựng` | pyvi xử lý đúng           |
+
+### 4.7 Query Rewriting
+
+| Component            | Tool                  | Chi tiết                                          |
+| -------------------- | --------------------- | -------------------------------------------------- |
+| Expansion viết tắt | `query_rewriter.py` | 80+ từ viết tắt (`dk` → `điều kiện`)    |
+| Domain context       | Append phrase         | `"theo pháp luật hiện hành"` cho query ngắn |
+
+**Ghi chú:** Query rewriting không nằm trong cấu hình tốt nhất hiện tại.
+
+### 4.8 Hybrid Retrieval
+
+#### Vector Search
+
+| Parameter         | Giá trị                  |
+| ----------------- | -------------------------- |
+| Candidate pool    | `candidate_pool_size=50` |
+| Similarity metric | Cosine (1 − distance/2)   |
+
+#### BM25 Search (song song)
+
+| Parameter      | Giá trị                           |
+| -------------- | ----------------------------------- |
+| Candidate pool | `top_k=50`                        |
+| Scoring        | Okapi BM25 (`k1=1.2`, `b=0.75`) |
+
+#### Score Fusion
+
+| Parameter            | Giá trị                                       |
+| -------------------- | ----------------------------------------------- |
+| Fusion method        | Weighted sum                                    |
+| `fusion_weight`    | 0.05 (5% BM25, 95% vector)                      |
+| BM25-only candidates | Thêm với score`bm25_score × fusion_weight` |
+
+### 4.9 Reranker
+
+| Component          | Tool             | Chi tiết                           |
+| ------------------ | ---------------- | ----------------------------------- |
+| Model              | BGE reranker API | `bge-reranker-v2-m3`              |
+| `max_candidates` | 10               | Số candidate gửi đến reranker   |
+| `top_n`          | 10               | Số kết quả sau reranking         |
+| `blend_weight`   | 0.05             | Blend điểm BGE với điểm hybrid |
+
+### 4.10 Evaluation
+
+| Component       | Chi tiết                                                                 |
+| --------------- | ------------------------------------------------------------------------- |
+| Metrics         | Recall@1, Recall@3, Recall@10                                             |
+| Formula         | `hits / total_questions`                                                |
+| Hit definition  | Ít nhất 1 trong top-k chunk có`benchmark_id` khớp `relevant_laws` |
+| Query embedding | Batch 1.238 query trong một API call                                     |
+| Số câu hỏi   | 1.238                                                                     |
 
 ---
 
-### Phase 6 — BM25 Sparse Index
+## 5. Cấu Hình Hybrid Search Tốt Nhất Không Dùng Reranker
 
-| Component | Tool | Details |
-|-----------|------|---------|
-| Library | **rank-bm25** | Okapi BM25 implementation |
-| Tokenizer | **pyvi** | Vietnamese word segmentation |
-| `k1` | 1.5 | Term frequency saturation |
-| `b` | 0.75 | Document length normalization |
-| Persistence | Pickle file | Saved alongside ChromaDB |
-| Compound words | `đấu_giá`, `giấy_phép`, `xây_dựng` | pyvi handles correctly |
+```yaml
+bm25:
+  k1: 1.2
+  b: 0.75
+  top_k: 50
+  fusion_weight: 0.05
 
----
+retrieval:
+  top_k: 10
+  candidate_pool_size: 50
+  similarity_threshold: 0.0
 
-### Phase 7 — Query Rewriting
+reranker:
+  enabled: false
+```
 
-| Component | Tool | Details |
-|-----------|------|---------|
-| Abbreviation expansion | `query_rewriter.py` | 80+ legal abbreviations (`dk` → `điều kiện`, `bhxh` → `bảo hiểm xã hội`) |
-| Domain context | Append phrase | `"theo pháp luật hiện hành"` for short queries |
+**Kết quả:**
 
----
+| Chỉ số  | Kết quả        |
+| --------- | ---------------- |
+| Recall@1  | **0.7924** |
+| Recall@3  | **0.9273** |
+| Recall@10 | **0.9717** |
 
-### Phase 8 — Hybrid Retrieval (per query)
+Diễn giải:
 
-#### 8a. Vector Search
-
-| Parameter | Value |
-|-----------|-------|
-| Candidate pool | `top_k × 2 = 20` |
-| Similarity metric | Cosine (1 − distance/2) |
-
-#### 8b. BM25 Search (parallel)
-
-| Parameter | Value |
-|-----------|-------|
-| Candidate pool | 20 |
-| Scoring | Okapi BM25 (`k1=1.5`, `b=0.75`) |
-
-#### 8c. Score Fusion
-
-| Parameter | Value |
-|-----------|-------|
-| Fusion method | Weighted sum |
-| `fusion_weight` | 0.5 (50% vector, 50% BM25) |
-| BM25-only candidates | Added with `bm25_score × 0.5` |
-
-#### 8d. Metadata Boost
-
-| Rule | Boost |
-|------|-------|
-| `status` contains `CÓ_HIỆU_LỰC` | +0.10 |
-| `unit_type == ARTICLE` | +0.04 |
-| `unit_type == CLAUSE` | +0.02 |
-
-#### 8e. Reranker — MMR Diversity
-
-| Component | Tool | Details |
-|-----------|------|---------|
-| Algorithm | Maximal Marginal Relevance | Balances relevance + diversity |
-| Parameter | Value | Description |
-| `lambda_mmr` | 0.7 | 70% relevance, 30% diversity |
-| `keyword_boost` | 0.15 | Jaccard overlap bonus |
-| `diversity_weight` | 0.15 | Penalty for similarity to already-selected chunks |
-| Similarity metric | Jaccard on token sets | Vietnamese-word-aware comparison |
+- `R@3=0.9273` — đáp án đúng thường đã nằm trong top 3.
+- `R@10=0.9717` — bước tạo candidate rất mạnh.
+- Vấn đề chính còn lại: cải thiện thứ hạng trong nhóm top đầu, đặc biệt từ rank 2/3 lên rank 1.
 
 ---
 
-### Phase 9 — Benchmark Evaluation
+## 6. Cấu Hình Tốt Nhất Có Reranker
 
-| Component | Details |
-|-----------|---------|
-| Metric | Recall@10 |
-| Formula | `hits / total_questions` |
-| Hit definition | At least 1 of top-10 chunks has `benchmark_id` matching `relevant_laws` |
-| Query embedding | All 1,238 queries batched in one API call |
-| Retrieval per query | Full pipeline (vector + BM25 + boost + MMR) |
+Giữ nguyên cấu hình hybrid, thêm:
 
----
+```yaml
+reranker:
+  enabled: true
+  bge:
+    model: "bge-reranker-v2-m3"
+    max_candidates: 10
+    top_n: 10
+    blend_weight: 0.05
+```
 
-## Complete Parameter Summary
+**Kết quả:**
 
-| Category | Parameter | Value |
-|----------|-----------|-------|
-| **Chunking** | `max_tokens` | 1,024 |
-| | `min_tokens` | 30 |
-| | `overlap_tokens` | 50 |
-| **Embedding** | Backend | API |
-| | Model | `Vietnamese_Embedding` |
-| | Dimension | 1,024 |
-| | Max seq length | 2,048 |
-| | API batch size | 64 |
-| | Retries | 3 (exponential backoff) |
-| **Vector Store** | Database | ChromaDB (HNSW) |
-| | Distance | Cosine |
-| **BM25** | `k1` | 1.5 |
-| | `b` | 0.75 |
-| | `fusion_weight` | 0.5 |
-| | Candidates | 20 |
-| **Retrieval** | `top_k` | 10 |
-| | `similarity_threshold` | 0.0 |
-| | `vector_weight` | 0.7 |
-| | `metadata_boost` | 0.2 |
-| **Reranker** | `lambda_mmr` | 0.7 |
-| | `keyword_boost` | 0.15 |
-| | `diversity_weight` | 0.15 |
-| **Context** | `use_llm` | false (heuristic) |
-| **Query Rewriter** | `enabled` | true |
-| | `expand_abbreviations` | true |
-| | `append_context` | true |
+| Chỉ số  | Hybrid only | Hybrid + BGE reranker | Chênh lệch |
+| --------- | ----------: | --------------------: | -----------: |
+| Recall@1  |      0.7924 |      **0.7981** |      +0.0057 |
+| Recall@3  |      0.9273 |      **0.9346** |      +0.0073 |
+| Recall@10 |      0.9717 |      **0.9725** |      +0.0008 |
+
+Diễn giải:
+
+- BGE reranker cải thiện nhẹ nhưng ổn định.
+- Tác động rõ nhất ở R@1 và R@3.
+- R@10 gần như không đổi — retrieval đã đưa đáp án đúng vào top 10 trong đa số trường hợp.
 
 ---
 
-## Recall@10 Progression
+## 7. Nhận Xét Về Reranker
 
-| Questions | Recall@10 |
-|-----------|-----------|
-| 100 | 0.9500 |
-| 200 | 0.9400 |
-| 300 | 0.9267 |
-| 400 | 0.9200 |
-| 500 | 0.9180 |
-| 600 | 0.9183 |
-| 700 | 0.9286 |
-| 800 | 0.9250 |
-| 900 | 0.9278 |
-| 1,000 | 0.9290 |
-| 1,100 | 0.9291 |
-| 1,200 | 0.9275 |
-| **1,238** | **0.9257** |
+- BGE reranker hiệu quả nhất khi chỉ dùng như tín hiệu phụ.
+- `blend_weight=0.05` là cấu hình tốt nhất hiện tại.
+- Khi tăng `blend_weight` quá cao (≥ 0.5), hiệu quả giảm rõ rệt.
+- Điểm BGE có thang nén, khoảng quan sát `0.03–0.43`.
+- Nếu dùng điểm BGE quá mạnh sẽ làm mất tín hiệu tốt từ hybrid retrieval.
 
+---
 
-## Hyperparameters Tuning
+## 8. Các Phương Pháp Đã Thử Trong Retrieval Và Ranking
 
-| Parameter | Current Value | Range | Location |
-|-----------|---------------|-------|----------|
-| max_tokens | 1024 | 256–2048 | config.yaml |
-| min_tokens | 30 | 10–100 | config.yaml |
-| overlap_tokens | 50 | 0–200 | config.yaml |
-| fusion_weight (BM25) | 0.5 | 0.0–1.0 | config.yaml |
-| bm25.k1 | 1.5 | 0.5–2.0 | config.yaml |
-| bm25.b | 0.75 | 0.0–1.0 | config.yaml |
-| bm25.top_k (candidates) | 20 | 10–50 | config.yaml |
-| retrieval.top_k | 10 | 5–30 | config.yaml |
-| similarity_threshold | 0.0 | 0.0–0.5 | config.yaml |
-| vector_weight | 0.7 | 0.0–1.0 | config.yaml |
-| metadata_boost | 0.2 | 0.0–0.5 | config.yaml |
-| reranker.lambda_mmr | 0.7 | 0.0–1.0 | config.yaml |
-| reranker.keyword_boost | 0.15 | 0.0–0.3 | config.yaml |
-| reranker.diversity_weight | 0.15 | 0.0–0.3 | config.yaml |
-| context.use_llm | false | true/false | config.yaml |
-| context.llm.temperature | 0.3 | 0.0–1.0 | config.yaml |
-| context.max_context_tokens | 100 | 60–200 | config.yaml |
-| query_rewriter.enabled | true | true/false | config.yaml |
-| query_rewriter.append_context | true | true/false | config.yaml |
-| Embedding model dim | 1024 | — | Fixed by API |
+| Nhóm                    | Phương pháp đã thử                          | Kết quả / nhận xét                                    |
+| ------------------------ | ------------------------------------------------- | --------------------------------------------------------- |
+| Dense retrieval          | Vector search bằng Vietnamese embedding API      | Nền tảng chính của hệ thống                         |
+| Sparse retrieval         | BM25                                              | Cải thiện exact match + thuật ngữ pháp lý           |
+| Hybrid retrieval         | Weighted score fusion giữa dense và BM25        | Tốt nhất hiện tại:`fusion_weight=0.05`              |
+| BM25 tuning              | Grid search`k1`, `b`, `fusion_weight`       | Tốt nhất:`k1=1.2`, `b=0.75`, `fusion_weight=0.05` |
+| Candidate pool tuning    | Tăng pool lên 50                                | Cải thiện recall trước reranking                      |
+| Query rewriting          | Chuẩn hóa / mở rộng query                     | Không nằm trong cấu hình tốt nhất                   |
+| Contextual chunking      | Context heuristic vào chunk                      | Đang dùng trong pipeline hiện tại                     |
+| Raw content test         | Thử dùng nội dung gốc không prefix context   | Tín hiệu tích cực nhỏ, chưa đủ thay đổi         |
+| Query embedding batching | Embed 1.238 query một lần                       | Giảm API call, tăng tốc benchmark                      |
+| BGE reranker             | Rerank top 10 bằng`bge-reranker-v2-m3`         | Cải thiện nhẹ R@1 và R@3                              |
+| BGE blend tuning         | Thử nhiều`blend_weight` (0.01–1.0)           | Tốt nhất:`0.05`; cao hơn làm giảm kết quả        |
+| Conditional reranking    | Chỉ gọi reranker khi điểm top đầu gần nhau | `top1_top2_gap=0.03`, giảm API call                    |
+| RRF fusion               | Reciprocal Rank Fusion thay thế weighted score   | Đã implement, chưa phải kết quả tốt nhất          |
+| MMR reranking            | Diversity-based reranking                         | Đã loại bỏ — không phù hợp mục tiêu R@1         |
+| LLM reranker (Gemma)     | Gemma chọn best trong top 3                      | Đã implement, chưa benchmark chính thức              |
+
+---
+
+## 9. Tham Số Chi Tiết
+
+| Nhóm                          | Tham số                 | Giá trị                                 |
+| ------------------------------ | ------------------------ | ----------------------------------------- |
+| **Chunking**             | `max_tokens`           | 512                                       |
+|                                | `min_tokens`           | 30                                        |
+|                                | `overlap_tokens`       | 50                                        |
+| **Embedding**            | Backend                  | API                                       |
+|                                | Model                    | `Vietnamese_Embedding`                  |
+|                                | Dimension                | 1.024                                     |
+|                                | Max seq length           | 2.048                                     |
+|                                | Batch size API           | 64                                        |
+|                                | Retries                  | 3 (exponential backoff)                   |
+| **Vector Store**         | Database                 | ChromaDB (HNSW)                           |
+|                                | Distance                 | Cosine                                    |
+| **BM25**                 | `k1`                   | 1.2                                       |
+|                                | `b`                    | 0.75                                      |
+|                                | `fusion_weight`        | 0.05                                      |
+|                                | `top_k` (candidate)    | 50                                        |
+| **Retrieval**            | `candidate_pool_size`  | 50                                        |
+|                                | `top_k`                | 10                                        |
+|                                | `similarity_threshold` | 0.0                                       |
+| **Reranker** (khi dùng) | Model                    | `bge-reranker-v2-m3`                    |
+|                                | `max_candidates`       | 10                                        |
+|                                | `top_n`                | 10                                        |
+|                                | `blend_weight`         | 0.05                                      |
+|                                | `timeout_sec`          | 120                                       |
+|                                | Conditional              | `enabled=true`, `top1_top10_gap=0.08` |
+| **Context**              | `use_llm`              | false (heuristic)                         |
+| **Query Rewriter**       | `enabled`              | false                                     |
+
+---
+
+## 10. Kết Luận Hiện Tại
+
+1. Hybrid search (dense + BM25) với `fusion_weight=0.05` là cấu hình baseline mạnh nhất và ổn định nhất.
+2. BGE reranker có cải thiện nhỏ, nhưng mức cải thiện có giới hạn.
+3. Phần retrieval đã rất mạnh ở R@10 (0.9717), nên hướng cải thiện chính là thứ hạng trong nhóm top 3 / top 10.
+4. Cấu hình tốt nhất hiện tại:
+   - **Không reranker:** R@1=0.7924, R@3=0.9273, R@10=0.9717
+   - **Có BGE reranker:** R@1=0.7981, R@3=0.9346, R@10=0.9725

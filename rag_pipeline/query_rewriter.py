@@ -14,7 +14,6 @@ Example:
 from __future__ import annotations
 
 import re
-from typing import Optional
 
 
 # ---------------------------------------------------------------------------
@@ -273,27 +272,6 @@ class QueryRewriter:
                 return query
 
         return f"{query} {self.context_phrase}"
-
-
-# ---------------------------------------------------------------------------
-# Convenience
-# ---------------------------------------------------------------------------
-
-_DEFAULT_REWRITER: Optional[QueryRewriter] = None
-
-
-def get_rewriter(
-    append_context: bool = True,
-    expand_abbreviations: bool = True,
-) -> QueryRewriter:
-    """Get or create the default QueryRewriter singleton."""
-    global _DEFAULT_REWRITER
-    if _DEFAULT_REWRITER is None:
-        _DEFAULT_REWRITER = QueryRewriter(
-            append_context=append_context,
-            expand_abbreviations=expand_abbreviations,
-        )
-    return _DEFAULT_REWRITER
 
 
 # ---------------------------------------------------------------------------

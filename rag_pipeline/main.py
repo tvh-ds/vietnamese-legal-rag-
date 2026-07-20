@@ -17,11 +17,11 @@ from pathlib import Path
 from bm25_retriever import BM25Retriever
 from config import Config, load_config
 from context_generator import LLMContextGenerator
-from data_loader import Article, load_articles
-from chunker import Chunk, Chunker, chunk_articles, set_tokenizer_model
-from embedder import Embedder, create_embedder
+from data_loader import load_articles
+from chunker import chunk_articles, set_tokenizer_model
+from embedder import create_embedder
 from query_rewriter import QueryRewriter
-from reranker import Reranker
+from reranker import Reranker, LLMReranker
 from retriever import Retriever
 from vector_store import VectorStore
 
@@ -72,14 +72,6 @@ def cmd_index(config: Config) -> None:
             timeout_sec=config.context.llm.timeout_sec,
         )
 
-    chunker = Chunker(
-        max_tokens=config.chunking.max_tokens,
-        min_tokens=config.chunking.min_tokens,
-        overlap_tokens=config.chunking.overlap_tokens,
-        enable_context=config.context.enabled,
-        max_context_tokens=config.context.max_context_tokens,
-        llm_context_generator=llm_gen,
-    )
     chunks = chunk_articles(
         articles,
         max_tokens=config.chunking.max_tokens,
@@ -149,9 +141,7 @@ def cmd_search(
     raw: bool = False,
 ) -> None:
     """Run a retrieval query and display results."""
-    import json as _json
-
-    # Load articles for the retriever (graph expansion needs the lookup)
+    # Load articles for the retriever
     print(f"Loading articles…", file=sys.stderr)
     articles = load_articles(config.data.path)
 
@@ -180,16 +170,41 @@ def cmd_search(
     # Reranker (Section 11)
     reranker = None
     if config.reranker.enabled:
-        reranker = Reranker(
-            base_url=getattr(config, "_api_base_url", ""),
-            api_key=config.reranker.bge.api_key,
-            model=config.reranker.bge.model,
-            endpoint=config.reranker.bge.endpoint,
-            max_candidates=config.reranker.bge.max_candidates,
-            top_n=config.reranker.bge.top_n,
-            timeout_sec=config.reranker.bge.timeout_sec,
-            blend_weight=config.reranker.bge.blend_weight,
-        )
+        if config.reranker.mode == "llm_api":
+            reranker = LLMReranker(
+                base_url=getattr(config, "_api_base_url", ""),
+                api_key=getattr(config, "_api_key", ""),
+                model=config.reranker.llm.model,
+                endpoint=config.reranker.llm.endpoint,
+                max_candidates=config.reranker.llm.max_candidates,
+                top_n=config.reranker.llm.top_n,
+                temperature=config.reranker.llm.temperature,
+                max_output_tokens=config.reranker.llm.max_output_tokens,
+                max_candidate_chars=config.reranker.llm.max_candidate_chars,
+                blend_weight=config.reranker.llm.blend_weight,
+                timeout_sec=config.reranker.llm.timeout_sec,
+                conditional_enabled=config.reranker.llm.conditional.enabled,
+                conditional_strategy=config.reranker.llm.conditional.strategy,
+                conditional_top1_top2_gap=config.reranker.llm.conditional.top1_top2_gap,
+                conditional_top1_top10_gap=config.reranker.llm.conditional.top1_top10_gap,
+                conditional_min_candidates=config.reranker.llm.conditional.min_candidates,
+            )
+        else:
+            reranker = Reranker(
+                base_url=getattr(config, "_api_base_url", ""),
+                api_key=config.reranker.bge.api_key,
+                model=config.reranker.bge.model,
+                endpoint=config.reranker.bge.endpoint,
+                max_candidates=config.reranker.bge.max_candidates,
+                top_n=config.reranker.bge.top_n,
+                timeout_sec=config.reranker.bge.timeout_sec,
+                blend_weight=config.reranker.bge.blend_weight,
+                conditional_enabled=config.reranker.bge.conditional.enabled,
+                conditional_strategy=config.reranker.bge.conditional.strategy,
+                conditional_top1_top2_gap=config.reranker.bge.conditional.top1_top2_gap,
+                conditional_top1_top10_gap=config.reranker.bge.conditional.top1_top10_gap,
+                conditional_min_candidates=config.reranker.bge.conditional.min_candidates,
+            )
 
     # BM25 retriever (if available)
     bm25 = None
@@ -206,16 +221,17 @@ def cmd_search(
         top_k=top_k or config.retrieval.top_k,
         similarity_threshold=config.retrieval.similarity_threshold,
         enable_metadata_filtering=config.retrieval.enable_metadata_filtering,
-        enable_graph_expansion=config.retrieval.enable_graph_expansion,
-        expansion_max_articles=config.retrieval.expansion_max_articles,
         vector_weight=config.retrieval.vector_weight,
         metadata_boost=config.retrieval.metadata_boost,
-        graph_boost=config.retrieval.graph_boost,
         prefer_active=config.metadata.prefer_active,
         topic_boost=config.metadata.topic_boost,
         reranker=reranker,
         bm25_retriever=bm25,
         bm25_weight=config.bm25.fusion_weight,
+        fusion_method=config.bm25.fusion_method,
+        rrf_k=config.bm25.rrf_k,
+        rrf_vector_weight=config.bm25.rrf_vector_weight,
+        rrf_bm25_weight=config.bm25.rrf_bm25_weight,
     )
 
     results = retriever.retrieve(query)

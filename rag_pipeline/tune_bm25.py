@@ -19,8 +19,6 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
-
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import Config, load_config
@@ -134,15 +132,12 @@ class BM25Tuner:
         base_retriever = Retriever(
             embedder=embedder,
             vector_store=store,
-            articles=articles,
             top_k=self.config.retrieval.top_k,
             candidate_pool_size=self.config.retrieval.candidate_pool_size,
             similarity_threshold=self.config.retrieval.similarity_threshold,
             enable_metadata_filtering=self.config.retrieval.enable_metadata_filtering,
-            enable_graph_expansion=False,
             vector_weight=self.config.retrieval.vector_weight,
             metadata_boost=self.config.retrieval.metadata_boost,
-            graph_boost=0.0,
             prefer_active=self.config.metadata.prefer_active,
             topic_boost=self.config.metadata.topic_boost,
             reranker=None,

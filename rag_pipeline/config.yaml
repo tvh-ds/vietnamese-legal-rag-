@@ -9,7 +9,7 @@
 chunking:
   # Maximum tokens per chunk before recursive splitting
   # Model has 8194 context window — 1024 balances context vs granularity
-  max_tokens: 1024
+  max_tokens: 512
   
   # Minimum tokens per chunk; shorter chunks merged with adjacent ones
   min_tokens: 30
@@ -64,7 +64,7 @@ vector_store:
 # ---------------------------------------------------------------------------
 query_rewriter:
   # Enable query normalization
-  enabled: true
+  enabled: false
   
   # Expand Vietnamese legal abbreviations (dk → điều kiện, vbpl → văn bản pháp luật)
   expand_abbreviations: true
@@ -78,7 +78,7 @@ query_rewriter:
 # ---------------------------------------------------------------------------
 bm25:
   # Enable BM25 + Vector hybrid retrieval
-  enabled: true
+  enabled: false
 
   # Number of candidates from BM25 to fuse with vector results
   # Recommend matching retrieval.candidate_pool_size for best recall
@@ -91,8 +91,16 @@ bm25:
   b: 0.75
   
   # Weight for BM25 scores in hybrid fusion (0.0 = pure vector, 1.0 = pure BM25)
-  fusion_weight: 0.05
-  
+  fusion_weight: 0.04
+
+  # Fusion method: "weighted" (weighted score blend) or "rrf" (reciprocal rank fusion)
+  fusion_method: "weighted"
+
+  # RRF parameters (used when fusion_method = "rrf")
+  rrf_k: 60
+  rrf_vector_weight: 1.0
+  rrf_bm25_weight: 1.0
+
   # Path to persist BM25 index (relative to config.yaml)
   index_path: "./chroma_db/bm25_index.pkl"
 
@@ -113,23 +121,19 @@ retrieval:
   # Enable metadata post-filtering (status, effectiveDate, topic)
   enable_metadata_filtering: false
 
-  # Enable graph expansion via article references
-  enable_graph_expansion: false
-
-  # Max articles to pull in via reference expansion
-  expansion_max_articles: 5
-
   # Weight factors for hybrid scoring
   vector_weight: 1
   metadata_boost: 0
-  graph_boost: 0
 
 # ---------------------------------------------------------------------------
 # Reranker (Section 11 of Pipeline.md)
 # ---------------------------------------------------------------------------
 reranker:
-  # Enable API BGE reranking after vector+BM25 retrieval
-  enabled: true
+  # Enable API reranking after vector+BM25 retrieval
+  enabled: false
+
+  # Reranker mode: "bge_api" (BGE reranker) or "llm_api" (Gemma selection)
+  mode: "bge_api"
 
   bge:
     # Model name passed to the reranker API
@@ -142,16 +146,77 @@ reranker:
     endpoint: "/v1/rerank"
 
     # Number of retrieved candidates to send to the reranker
-    max_candidates: 50
+    max_candidates: 10
 
     # Number of reranked results returned by the API
-    top_n: 50
+    top_n: 10
+
+    # Request timeout in seconds
+    timeout_sec: 120
+
+    # Blend weight: 1.0 = pure BGE score, 0.8 = 80% BGE + 20% hybrid score
+    blend_weight: 0.05
+
+    conditional:
+      # If false, always call BGE when reranker.enabled=true
+      enabled: true
+
+      # "top1_top2_gap" reranks only when rank 1 and rank 2 are close.
+      # "top1_top10_gap" reranks only when the top 10 are tightly packed.
+      strategy: "top1_top10_gap"
+
+      # If top1_score - top2_score < threshold, call BGE
+      top1_top2_gap: 0.03
+
+      # Used only with strategy: "top1_top10_gap"
+      top1_top10_gap: 0.08
+
+      min_candidates: 2
+
+  # -----------------------------------------------------------------------
+  # LLM reranker (Gemma) — used when reranker.mode: "llm_api"
+  # -----------------------------------------------------------------------
+  llm:
+    # Model name
+    model: "gemma-4-31B-it"
+
+    # Chat completions endpoint
+    endpoint: "/v1/chat/completions"
+
+    # Number of top candidates to send to the LLM
+    max_candidates: 3
+
+    # Number of reranked results to keep
+    top_n: 3
+
+    # Sampling temperature (0.0 = deterministic)
+    temperature: 0.0
+
+    # Max output tokens for the JSON response
+    max_output_tokens: 48
+
+    # Max characters per candidate document sent to the LLM
+    max_candidate_chars: 1000
+
+    # Blend weight (1.0 = pure LLM selection)
+    blend_weight: 1.0
 
     # Request timeout in seconds
     timeout_sec: 60
 
-    # Blend weight: 1.0 = pure BGE score, 0.8 = 80% BGE + 20% hybrid score
-    blend_weight: 1.0
+    conditional:
+      # If false, always call LLM when reranker.enabled=true
+      enabled: false
+
+      # "top1_top2_gap" reranks only when rank 1 and rank 2 are close
+      strategy: "top1_top2_gap"
+
+      # If top1_score - top2_score < threshold, call LLM
+      top1_top2_gap: 0.03
+
+      top1_top10_gap: 0.08
+
+      min_candidates: 2
 
 # ---------------------------------------------------------------------------
 # Context generation (Section 5 of Pipeline.md)

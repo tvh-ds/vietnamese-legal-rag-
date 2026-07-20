@@ -9,6 +9,7 @@ __pycache__/
 venv/
 env/
 .env
+.env.*
 
 # ChromaDB vector store (large binary artifact — rebuild locally)
 chroma_db/
@@ -30,6 +31,9 @@ chunks_cache.pkl
 *.npy
 benchmark_results.json
 
+# Generated reports
+*.pdf
+
 # IDE / editor
 .vscode/
 .idea/
@@ -48,8 +52,6 @@ build/
 *.egg
 
 # Environment / secrets
-.env
-.env.*
 HF_TOKEN
 
 # Jupyter

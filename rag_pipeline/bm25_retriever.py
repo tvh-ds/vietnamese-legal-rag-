@@ -84,8 +84,7 @@ class BM25Retriever:
         """Build BM25 index from chunk contents.
 
         Args:
-            chunks: List of RetrievalResult objects (or Chunk objects with
-                    .content and .metadata attributes).
+            chunks: List of RetrievalResult or Chunk objects.
         """
         from rank_bm25 import BM25Okapi
 
@@ -101,11 +100,35 @@ class BM25Retriever:
             if not tokens:
                 continue
 
+            # Build metadata — try .metadata dict first (RetrievalResult),
+            # fall back to Chunk attributes
+            ch_meta = getattr(ch, "metadata", {})
+            if ch_meta:
+                meta = {k: str(v) if isinstance(v, (int, float, bool)) else v for k, v in ch_meta.items()}
+            else:
+                meta = {
+                    "article_id": getattr(ch, "article_id", ""),
+                    "unit_type": getattr(ch, "unit_type", "ARTICLE"),
+                    "order": getattr(ch, "order", 0),
+                    "hierarchy_path": getattr(ch, "hierarchy_path", ""),
+                    "document_id": getattr(ch, "document_id", ""),
+                    "document_type": getattr(ch, "document_type", ""),
+                    "effective_date": getattr(ch, "effective_date", ""),
+                    "status": getattr(ch, "status", ""),
+                    "topic_id": getattr(ch, "topic_id", ""),
+                    "topic_name": getattr(ch, "topic_name", ""),
+                    "chapter_title": getattr(ch, "chapter_title", ""),
+                    "map_code": getattr(ch, "map_code", ""),
+                    "benchmark_id": str(getattr(ch, "benchmark_id", "") or ""),
+                }
+
             self._chunks.append({
                 "chunk_id": getattr(ch, "chunk_id", ""),
                 "article_id": getattr(ch, "article_id", ""),
                 "unit_type": getattr(ch, "unit_type", "ARTICLE"),
                 "content": content,
+                "raw_content": getattr(ch, "raw_content", content),
+                "metadata": meta,
             })
             self._doc_texts.append(content)
             self._tokenized_corpus.append(tokens)
@@ -125,6 +148,15 @@ class BM25Retriever:
 
     def is_built(self) -> bool:
         return self._bm25 is not None and len(self._tokenized_corpus) > 0
+
+    def has_benchmark_metadata(self) -> bool:
+        """Check if stored chunks carry benchmark_id metadata."""
+        if not self._chunks:
+            return False
+        return any(
+            item.get("metadata", {}).get("benchmark_id", "")
+            for item in self._chunks
+        )
 
     # -- search --------------------------------------------------------------
 
