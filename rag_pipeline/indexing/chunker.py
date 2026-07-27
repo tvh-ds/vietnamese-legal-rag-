@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path as _Path
 from typing import Callable
 
-from data_loader import Article
+from data.data_loader import Article
 
 
 # ---------------------------------------------------------------------------
@@ -496,7 +496,7 @@ class Chunker:
 # ---------------------------------------------------------------------------
 
 
-_CHUNK_CACHE = "chunks_cache.pkl"
+_CHUNK_CACHE = "artifacts/cache/chunks_cache.pkl"
 
 
 def chunk_articles(
@@ -540,6 +540,7 @@ def chunk_articles(
         all_chunks.extend(chunker.chunk_article(article))
 
     # Save cache
+    _Path(_CHUNK_CACHE).parent.mkdir(parents=True, exist_ok=True)
     with open(_CHUNK_CACHE, "wb") as f:
         _pickle.dump(all_chunks, f)
     print(f"  Saved {len(all_chunks)} chunks to {_CHUNK_CACHE}")
@@ -553,10 +554,10 @@ def chunk_articles(
 
 if __name__ == "__main__":
     import sys
+    sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+    from data.data_loader import load_articles
 
     data_dir = sys.argv[1] if len(sys.argv) > 1 else "../data"
-    from data_loader import load_articles
-
     articles = load_articles(data_dir)
     print(f"Loaded {len(articles)} articles")
 

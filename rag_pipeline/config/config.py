@@ -51,7 +51,7 @@ class VectorStoreConfig:
     """Vector database parameters (Section 8 of Pipeline.md)."""
 
     type: str = "chromadb"
-    path: str = "./chroma_db"
+    path: str = "../artifacts/vector_store"
     collection_name: str = "vbqppl_legal_chunks"
 
 
@@ -74,7 +74,7 @@ class BM25Config:
     k1: float = 1.5
     b: float = 0.75
     fusion_weight: float = 0.5
-    index_path: str = "./chroma_db/bm25_index.pkl"
+    index_path: str = "../artifacts/vector_store/bm25_index.pkl"
 
     # Fusion method: "weighted" (weighted score blend) or "rrf" (reciprocal rank fusion)
     fusion_method: str = "weighted"
@@ -112,6 +112,7 @@ class ConditionalRerankerConfig:
 class BGERerankerConfig:
     """API BGE reranker parameters."""
 
+    mode: str = "global_score_sort"
     model: str = "bge-reranker-v2-m3"
     api_key: str = "${FPT_RERANKER_API_KEY}"
     endpoint: str = "/v1/rerank"
@@ -123,29 +124,11 @@ class BGERerankerConfig:
 
 
 @dataclass
-class LLMRerankerConfig:
-    """LLM API reranker parameters (Gemma selects best among top candidates)."""
-
-    model: str = "gemma-4-31B-it"
-    endpoint: str = "/v1/chat/completions"
-    max_candidates: int = 3
-    top_n: int = 3
-    temperature: float = 0.0
-    max_output_tokens: int = 48
-    max_candidate_chars: int = 1000
-    blend_weight: float = 1.0
-    timeout_sec: int = 60
-    conditional: ConditionalRerankerConfig = field(default_factory=ConditionalRerankerConfig)
-
-
-@dataclass
 class RerankerConfig:
     """Reranker parameters (Section 11 of Pipeline.md)."""
 
     enabled: bool = False
-    mode: str = "bge_api"  # "bge_api" or "llm_api"
     bge: BGERerankerConfig = field(default_factory=BGERerankerConfig)
-    llm: LLMRerankerConfig = field(default_factory=LLMRerankerConfig)
 
 
 @dataclass
@@ -209,11 +192,8 @@ class Config:
         ctx_raw = raw.get("context", {})
         ctx_llm_raw = ctx_raw.pop("llm", {}) if isinstance(ctx_raw, dict) else {}
         reranker_raw = raw.get("reranker", {})
-        reranker_mode = reranker_raw.get("mode", "bge_api") if isinstance(reranker_raw, dict) else "bge_api"
         bge_raw = reranker_raw.pop("bge", {}) if isinstance(reranker_raw, dict) else {}
-        reranker_llm_raw = reranker_raw.pop("llm", {}) if isinstance(reranker_raw, dict) else {}
         conditional_raw = bge_raw.pop("conditional", {}) if isinstance(bge_raw, dict) else {}
-        llm_conditional_raw = reranker_llm_raw.pop("conditional", {}) if isinstance(reranker_llm_raw, dict) else {}
 
         # Shared API config (base_url + api_key)
         shared_api = raw.get("api", {})
@@ -238,8 +218,8 @@ class Config:
             retrieval=RetrievalConfig(**raw.get("retrieval", {})),
             reranker=RerankerConfig(
                 enabled=reranker_raw.get("enabled", False),
-                mode=reranker_mode,
                 bge=BGERerankerConfig(
+                    mode=bge_raw.get("mode", "global_score_sort"),
                     model=bge_raw.get("model", "bge-reranker-v2-m3"),
                     api_key=_resolve_env(bge_raw.get("api_key", "${FPT_RERANKER_API_KEY}")),
                     endpoint=bge_raw.get("endpoint", "/v1/rerank"),
@@ -253,24 +233,6 @@ class Config:
                         top1_top2_gap=conditional_raw.get("top1_top2_gap", 0.03),
                         top1_top10_gap=conditional_raw.get("top1_top10_gap", 0.08),
                         min_candidates=conditional_raw.get("min_candidates", 2),
-                    ),
-                ),
-                llm=LLMRerankerConfig(
-                    model=reranker_llm_raw.get("model", "gemma-4-31B-it"),
-                    endpoint=reranker_llm_raw.get("endpoint", "/v1/chat/completions"),
-                    max_candidates=reranker_llm_raw.get("max_candidates", 3),
-                    top_n=reranker_llm_raw.get("top_n", 3),
-                    temperature=reranker_llm_raw.get("temperature", 0.0),
-                    max_output_tokens=reranker_llm_raw.get("max_output_tokens", 48),
-                    max_candidate_chars=reranker_llm_raw.get("max_candidate_chars", 1000),
-                    blend_weight=reranker_llm_raw.get("blend_weight", 1.0),
-                    timeout_sec=reranker_llm_raw.get("timeout_sec", 60),
-                    conditional=ConditionalRerankerConfig(
-                        enabled=llm_conditional_raw.get("enabled", False),
-                        strategy=llm_conditional_raw.get("strategy", "top1_top2_gap"),
-                        top1_top2_gap=llm_conditional_raw.get("top1_top2_gap", 0.03),
-                        top1_top10_gap=llm_conditional_raw.get("top1_top10_gap", 0.08),
-                        min_candidates=llm_conditional_raw.get("min_candidates", 2),
                     ),
                 ),
             ),
@@ -292,10 +254,10 @@ class Config:
 
 
 def load_config(path: str | Path = "config.yaml") -> Config:
-    """Convenience loader. Resolves the path against cwd."""
+    """Convenience loader. Resolves the path against rag_package/ root."""
     config_path = Path(path)
     if not config_path.is_absolute():
-        package_dir = Path(__file__).parent
+        package_dir = Path(__file__).resolve().parent.parent
         candidate = package_dir / config_path
         if candidate.exists():
             config_path = candidate

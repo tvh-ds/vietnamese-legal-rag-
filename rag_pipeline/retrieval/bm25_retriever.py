@@ -15,7 +15,7 @@ import pickle
 from pathlib import Path
 from typing import Optional
 
-from pipeline_types import RetrievalResult
+from shared.pipeline_types import RetrievalResult
 
 logger = logging.getLogger(__name__)
 

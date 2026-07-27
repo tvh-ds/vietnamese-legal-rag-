@@ -17,7 +17,7 @@ from typing import Optional
 
 import numpy as np
 
-from chunker import Chunk
+from indexing.chunker import Chunk
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +27,14 @@ class VectorStore:
 
     Usage::
 
-        store = VectorStore(path="./chroma_db", collection_name="vbqppl_chunks")
+        store = VectorStore(path="artifacts/vector_store", collection_name="vbqppl_chunks")
         store.upsert(chunks, embeddings)
         results = store.query(query_embedding, top_k=10)
     """
 
     def __init__(
         self,
-        path: str | Path = "./chroma_db",
+        path: str | Path = "artifacts/vector_store",
         collection_name: str = "vbqppl_legal_chunks",
     ) -> None:
         self.path = Path(path)

@@ -14,16 +14,18 @@ import sys
 import time
 from pathlib import Path
 
-from bm25_retriever import BM25Retriever
-from config import Config, load_config
-from context_generator import LLMContextGenerator
-from data_loader import load_articles
-from chunker import chunk_articles, set_tokenizer_model
-from embedder import create_embedder
-from query_rewriter import QueryRewriter
-from reranker import Reranker, LLMReranker
-from retriever import Retriever
-from vector_store import VectorStore
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from config.config import Config, load_config
+from data.data_loader import load_articles
+from indexing.chunker import chunk_articles, set_tokenizer_model
+from indexing.context_generator import LLMContextGenerator
+from indexing.embedder import create_embedder
+from indexing.vector_store import VectorStore
+from retrieval.bm25_retriever import BM25Retriever
+from retrieval.query_rewriter import QueryRewriter
+from retrieval.reranker import Reranker
+from retrieval.retriever import Retriever
 
 logger = logging.getLogger("rag_pipeline")
 
@@ -170,41 +172,22 @@ def cmd_search(
     # Reranker (Section 11)
     reranker = None
     if config.reranker.enabled:
-        if config.reranker.mode == "llm_api":
-            reranker = LLMReranker(
-                base_url=getattr(config, "_api_base_url", ""),
-                api_key=getattr(config, "_api_key", ""),
-                model=config.reranker.llm.model,
-                endpoint=config.reranker.llm.endpoint,
-                max_candidates=config.reranker.llm.max_candidates,
-                top_n=config.reranker.llm.top_n,
-                temperature=config.reranker.llm.temperature,
-                max_output_tokens=config.reranker.llm.max_output_tokens,
-                max_candidate_chars=config.reranker.llm.max_candidate_chars,
-                blend_weight=config.reranker.llm.blend_weight,
-                timeout_sec=config.reranker.llm.timeout_sec,
-                conditional_enabled=config.reranker.llm.conditional.enabled,
-                conditional_strategy=config.reranker.llm.conditional.strategy,
-                conditional_top1_top2_gap=config.reranker.llm.conditional.top1_top2_gap,
-                conditional_top1_top10_gap=config.reranker.llm.conditional.top1_top10_gap,
-                conditional_min_candidates=config.reranker.llm.conditional.min_candidates,
-            )
-        else:
-            reranker = Reranker(
-                base_url=getattr(config, "_api_base_url", ""),
-                api_key=config.reranker.bge.api_key,
-                model=config.reranker.bge.model,
-                endpoint=config.reranker.bge.endpoint,
-                max_candidates=config.reranker.bge.max_candidates,
-                top_n=config.reranker.bge.top_n,
-                timeout_sec=config.reranker.bge.timeout_sec,
-                blend_weight=config.reranker.bge.blend_weight,
-                conditional_enabled=config.reranker.bge.conditional.enabled,
-                conditional_strategy=config.reranker.bge.conditional.strategy,
-                conditional_top1_top2_gap=config.reranker.bge.conditional.top1_top2_gap,
-                conditional_top1_top10_gap=config.reranker.bge.conditional.top1_top10_gap,
-                conditional_min_candidates=config.reranker.bge.conditional.min_candidates,
-            )
+        reranker = Reranker(
+            base_url=getattr(config, "_api_base_url", ""),
+            api_key=config.reranker.bge.api_key,
+            model=config.reranker.bge.model,
+            endpoint=config.reranker.bge.endpoint,
+            max_candidates=config.reranker.bge.max_candidates,
+            top_n=config.reranker.bge.top_n,
+            timeout_sec=config.reranker.bge.timeout_sec,
+            blend_weight=config.reranker.bge.blend_weight,
+            mode=config.reranker.bge.mode,
+            conditional_enabled=config.reranker.bge.conditional.enabled,
+            conditional_strategy=config.reranker.bge.conditional.strategy,
+            conditional_top1_top2_gap=config.reranker.bge.conditional.top1_top2_gap,
+            conditional_top1_top10_gap=config.reranker.bge.conditional.top1_top10_gap,
+            conditional_min_candidates=config.reranker.bge.conditional.min_candidates,
+        )
 
     # BM25 retriever (if available)
     bm25 = None
@@ -217,7 +200,6 @@ def cmd_search(
     retriever = Retriever(
         embedder=embedder,
         vector_store=store,
-        articles=articles,
         top_k=top_k or config.retrieval.top_k,
         similarity_threshold=config.retrieval.similarity_threshold,
         enable_metadata_filtering=config.retrieval.enable_metadata_filtering,
@@ -300,7 +282,7 @@ def main() -> None:
     # Resolve config path
     config_path = Path(args.config)
     if not config_path.is_absolute():
-        package_dir = Path(__file__).parent
+        package_dir = Path(__file__).resolve().parent.parent
         candidate = package_dir / config_path
         if candidate.exists():
             config_path = candidate

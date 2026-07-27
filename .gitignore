@@ -11,25 +11,19 @@ env/
 .env
 .env.*
 
-# ChromaDB vector store (large binary artifact — rebuild locally)
-chroma_db/
-rag_pipeline/chroma_db/
-chroma_db_bench/
+# ChromaDB vector store (large binary — rebuild locally)
 
-# Large benchmark files (>30MB — keep locally)
-Correct ID.json
-1238_question_map_phap_dien.json
-corpus/
+# Benchmark input files (large — keep locally)
+benchmarks/input/
 
-# BM25 tuning output
-bm25_tuning_results.json
+# Benchmark results (regenerated each run)
+benchmarks/results/
 
-# Chunk cache (rebuild with --rechunk)
-chunks_cache.pkl
+# Artifact cache (rebuild with --rechunk)
+artifacts/
 
 # Temp export files
 *.npy
-benchmark_results.json
 
 # Generated reports
 *.pdf

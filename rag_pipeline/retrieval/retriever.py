@@ -5,7 +5,7 @@ Implements Sections 10 & 11 of Pipeline.md:
   1. Vector Search — semantic similarity via embeddings.
   2. BM25 Fusion — sparse term matching blended with dense scores.
   3. Metadata Filtering — filter/boost by status, effectiveDate, topic, unitType.
-  4. Reranking — optional BGE or LLM reranker.
+  4. Reranking — optional BGE reranker.
 """
 
 from __future__ import annotations
@@ -15,10 +15,10 @@ from typing import Optional
 
 import numpy as np
 
-from bm25_retriever import BM25Retriever
-from embedder import Embedder
-from pipeline_types import RetrievalResult
-from vector_store import VectorStore
+from indexing.embedder import Embedder
+from indexing.vector_store import VectorStore
+from retrieval.bm25_retriever import BM25Retriever
+from shared.pipeline_types import RetrievalResult
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ class Retriever:
         metadata_boost: float = 0.2,
         prefer_active: bool = True,
         topic_boost: bool = True,
-        reranker: "Reranker | LLMReranker | None" = None,
+        reranker: "Reranker | None" = None,
         bm25_retriever: BM25Retriever | None = None,
         bm25_weight: float = 0.5,
         fusion_method: str = "weighted",
@@ -117,7 +117,8 @@ class Retriever:
         # Stage 2 — Metadata filtering / boosting
         scored = self._apply_metadata_boost(vector_results, filter_topic_id)
 
-        # Stage 3 — Rerank
+        # Stage 3 — Capture pre-rerank candidates then rerank
+        self._pre_rerank_candidates = scored[:]
         if self.reranker is not None:
             scored = self.reranker.rerank(query, scored, top_k=k)
         else:
