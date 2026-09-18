@@ -18,17 +18,12 @@ pip install -r rag_pipeline/requirements.txt
 
 Two separate API keys are needed:
 
-```powershell
-# PowerShell
-$env:FPT_API_KEY = "sk-your-embedding-key"
-$env:FPT_RERANKER_API_KEY = "sk-your-reranker-key"
+```bash
+# bash
+$env:EMBEDDING_KEY = "sk-your-embedding-key"
+$env:RERANKER_API_KEY = "sk-your-reranker-key"
 ```
 
-```bash
-# Bash
-export FPT_API_KEY="sk-your-embedding-key"
-export FPT_RERANKER_API_KEY="sk-your-reranker-key"
-```
 
 ### 3. Add your data
 
