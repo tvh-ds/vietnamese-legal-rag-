@@ -17,3 +17,6 @@ pyvi>=0.0.3
 
 # Progress bars
 tqdm>=4.66.0
+
+# Hybrid retrieval tuning
+optuna>=4.0

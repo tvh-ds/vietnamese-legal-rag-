@@ -13,7 +13,10 @@ Example:
 
 from __future__ import annotations
 
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +140,84 @@ _TELEX_TONE_MARKERS = re.compile(r"[a-z]+[sfrxj]$", re.IGNORECASE)
 # ---------------------------------------------------------------------------
 # Query Rewriter
 # ---------------------------------------------------------------------------
+
+def create_query_rewriter(config):
+    """Build the configured rewriter for both search and evaluation."""
+    settings = config.query_rewriter
+    if not settings.enabled:
+        return None
+
+    rules = QueryRewriter(
+        append_context=settings.append_context,
+        context_phrase=settings.context_phrase,
+        expand_abbreviations=settings.expand_abbreviations,
+    )
+    if settings.mode == "rules":
+        return rules
+    if settings.mode != "llm":
+        raise ValueError("query_rewriter.mode must be 'rules' or 'llm'")
+
+    from urllib.parse import urlsplit
+
+    from openai import OpenAI
+
+    base_url = getattr(config, "_api_base_url", "")
+    api_key = getattr(config, "_api_key", "")
+    endpoint = urlsplit(base_url)
+    if endpoint.scheme != "https" or not endpoint.hostname or not api_key:
+        raise ValueError("LLM query rewriting requires an HTTPS API endpoint and API key")
+    client = OpenAI(base_url=f"{base_url}/v1", api_key=api_key, timeout=15, max_retries=1)
+    return LLMQueryRewriter(client, settings.model, rules)
+
+
+class LLMQueryRewriter:
+    """Rewrite Vietnamese search queries with a deterministic local fallback."""
+
+    def __init__(self, client, model: str, fallback: QueryRewriter) -> None:
+        self.client = client
+        self.model = model
+        self.fallback = fallback
+
+    def rewrite(self, query: str) -> str:
+        query = query.strip()
+        if not query or len(query) > 2000:
+            return self.fallback.rewrite(query)
+
+        from openai import OpenAIError
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Viết lại đầu vào thành một truy vấn tìm kiếm pháp luật tiếng Việt. "
+                            "Sửa lỗi chính tả, mở rộng từ viết tắt rõ nghĩa và bỏ lời chào. "
+                            "Giữ nguyên ý định, tên riêng, số hiệu và ngày tháng. "
+                            "Không trả lời câu hỏi hoặc thêm dữ kiện. "
+                            "Chỉ trả về một dòng truy vấn."
+                        ),
+                    },
+                    {"role": "user", "content": query},
+                ],
+                temperature=0,
+                max_tokens=128,
+            )
+            choice = response.choices[0]
+            rewritten = (choice.message.content or "").strip()
+            if (
+                choice.finish_reason == "stop"
+                and 0 < len(rewritten) <= 1000
+                and len(rewritten.splitlines()) == 1
+                and all(character.isprintable() for character in rewritten)
+            ):
+                return rewritten
+        except (IndexError, OpenAIError):
+            logger.warning("LLM query rewrite failed. Using local normalization.")
+
+        return self.fallback.rewrite(query)
+
 
 class QueryRewriter:
     """Normalize user queries for Vietnamese legal retrieval.

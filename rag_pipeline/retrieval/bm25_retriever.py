@@ -200,6 +200,16 @@ class BM25Retriever:
 
         return results
 
+    def set_scoring(self, k1: float, b: float, top_k: int) -> None:
+        """Apply scoring parameters without tokenizing the corpus again."""
+        if self._tokenized_corpus and (self._bm25 is None or (k1, b) != (self.k1, self.b)):
+            from rank_bm25 import BM25Okapi
+
+            self._bm25 = BM25Okapi(self._tokenized_corpus, k1=k1, b=b)
+        self.k1 = k1
+        self.b = b
+        self.top_k = top_k
+
     # -- persistence ---------------------------------------------------------
 
     def save(self, path: str | Path) -> None:
@@ -237,14 +247,7 @@ class BM25Retriever:
         retriever._doc_texts = data["doc_texts"]
         retriever._tokenized_corpus = data["tokenized_corpus"]
 
-        # Rebuild BM25Okapi
-        from rank_bm25 import BM25Okapi
-        if retriever._tokenized_corpus:
-            retriever._bm25 = BM25Okapi(
-                retriever._tokenized_corpus,
-                k1=retriever.k1,
-                b=retriever.b,
-            )
+        retriever.set_scoring(retriever.k1, retriever.b, retriever.top_k)
 
         logger.info("BM25 index loaded from %s (%d docs)", path, len(retriever._chunks))
         return retriever

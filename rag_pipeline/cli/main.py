@@ -23,7 +23,7 @@ from indexing.context_generator import LLMContextGenerator
 from indexing.embedder import create_embedder
 from indexing.vector_store import VectorStore
 from retrieval.bm25_retriever import BM25Retriever
-from retrieval.query_rewriter import QueryRewriter
+from retrieval.query_rewriter import create_query_rewriter
 from retrieval.reranker import Reranker
 from retrieval.retriever import Retriever
 
@@ -159,12 +159,8 @@ def cmd_search(
 
     # Query rewriting (Section 9)
     original_query = query
-    if config.query_rewriter.enabled and not raw:
-        rewriter = QueryRewriter(
-            append_context=config.query_rewriter.append_context,
-            context_phrase=config.query_rewriter.context_phrase,
-            expand_abbreviations=config.query_rewriter.expand_abbreviations,
-        )
+    rewriter = None if raw else create_query_rewriter(config)
+    if rewriter is not None:
         query = rewriter.rewrite(query)
         if query != original_query:
             print(f"Rewritten: {original_query} → {query}", file=sys.stderr)
@@ -196,11 +192,14 @@ def cmd_search(
         if bm25 is None:
             print("Warning: BM25 index not found — run 'index' first to build it",
                   file=sys.stderr)
+        else:
+            bm25.set_scoring(config.bm25.k1, config.bm25.b, config.bm25.top_k)
 
     retriever = Retriever(
         embedder=embedder,
         vector_store=store,
         top_k=top_k or config.retrieval.top_k,
+        candidate_pool_size=config.retrieval.candidate_pool_size,
         similarity_threshold=config.retrieval.similarity_threshold,
         enable_metadata_filtering=config.retrieval.enable_metadata_filtering,
         vector_weight=config.retrieval.vector_weight,

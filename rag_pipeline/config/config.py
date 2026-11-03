@@ -63,6 +63,8 @@ class QueryRewriterConfig:
     expand_abbreviations: bool = True
     append_context: bool = True
     context_phrase: str = "theo pháp luật hiện hành"
+    mode: str = "rules"
+    model: str = "gemma-4-31B-it"
 
 
 @dataclass

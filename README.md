@@ -1,318 +1,94 @@
-# Vietnamese Legal RAG — Chunking + Retrieval Pipeline
+# Vietnamese Legal RAG
 
-A production-ready pipeline for chunking Vietnamese legal documents (VBQPPL), generating embeddings, and performing hybrid retrieval (dense vector + BM25 weighted fusion + optional BGE reranker) for RAG-powered legal Q&A.
+A retrieval engine for Vietnamese legal question answering. It indexes the Vietnamese legal codification corpus (Pháp điển), then returns ranked legal passages for an agentic RAG chatbot.
 
----
+**FPT Smart Cloud · AI Engineer Intern · Hanoi, Vietnam · June–September 2026**
 
-## Quickstart
+## Results
 
-### 1. Clone and install
+Replacing article-level chunks with recursive, structure-aware chunks and injecting their parent context raised **Recall@10 from approximately 87% to 96.9%**. I then built a hybrid retriever and used a coarse-to-fine Optuna search to tune BM25 term saturation, document length normalization, and the dense/sparse fusion weight. Then I also leveraged PyVi and LLM-based query rerwrite to further push performance
 
-```bash
-git clone https://github.com/tvh-ds/vietnamese-legal-rag-.git
-cd vietnamese-legal-rag-
-pip install -r rag_pipeline/requirements.txt
+| Metric | Tuned hybrid retrieval |
+| --- | ---: |
+| Recall@1 | **80.2%** |
+| Recall@3 | **92.5%** |
+| Recall@10 | **98.6%** |
+| Precision@10 | **91.4%** |
+
+These results come from the internship evaluation across **8,238 benchmark queries**. The checkout includes a benchmark runner that takes a separate question set and relevance mapping. Historical benchmark report ([English](docs/benchmark-report.en.md) · [Tiếng Việt](docs/benchmark-report.md)).
+
+## How retrieval works
+
+```mermaid
+flowchart LR
+    A["Pháp điển JSON"] --> B["Article → clause → point"]
+    B --> C["Inject parent context"]
+    C --> D["Dense embeddings · ChromaDB"]
+    C --> E["PyVi segmentation · BM25"]
+    Q["Vietnamese query"] --> R["Optional LLM rewriting"]
+    R --> D
+    R --> E
+    D --> F["Weighted fusion"]
+    E --> F
+    F --> G["Optional BGE reranking"]
+    G --> H["Ranked legal passages"]
 ```
 
-### 2. Set API keys
+- **Structure-aware chunking.** Recursively splits long articles along their clauses and points and retains hierarchical context so a passage can be interpreted in relation to its parent article.
+- **Hybrid retrieval.** Dense embeddings capture semantic matches. BM25 adds lexical matches using PyVi segmentation at both index and query time, so phrases such as `giấy phép` can be matched as compound terms.
+- **Query rewriting.** An optional LLM rewrites noisy, abbreviated, and conversational Vietnamese into concise legal search queries. Local normalization provides a fallback when the model request fails or returns unusable output.
+- **Retrieval tuning.** Optuna searches a coarse grid, then samples around the best region to tune `k1`, `b`, and the sparse fusion weight. The tuner reuses the tokenized corpus and query embeddings across trials.
 
-Two separate API keys are needed:
+## Run locally
+
+Use Python 3.10 or later. Run commands from the repository root.
 
 ```bash
-# bash
-$env:EMBEDDING_KEY = "sk-your-embedding-key"
-$env:RERANKER_API_KEY = "sk-your-reranker-key"
+python -m pip install -r rag_pipeline/requirements.txt
 ```
 
+The checked-in configuration uses FPT Cloud embeddings and BGE reranking. Set these variables before running it.
 
-### 3. Add your data
+| Environment variable | Used by |
+| --- | --- |
+| `FPT_API_KEY` | API embeddings and optional LLM rewriting |
+| `FPT_RERANKER_API_KEY` | BGE reranking when enabled |
 
-Place the following files in `benchmarks/input/` (see .gitignore):
-
-- `benchmarks/input/Correct ID.json` — article content → benchmark ID mapping
-- `benchmarks/input/1238_question_map_phap_dien.json` — 1,238 benchmark questions
-
-JSON data files go in `data/phap_dien_dataset_45_chu_de/` (already configured).
-
-### 4. Run the benchmark
+The included 45-topic JSON corpus is sourced from Vietnam’s publicly available Pháp điển codification. Build the index from `data/phap_dien_dataset_45_chu_de/` before searching. [Ministry of Justice Pháp điển portal](https://phapdien.moj.gov.vn/Pages/chi-tiet-bo-phap-dien.aspx)
 
 ```bash
-python -m rag_pipeline.cli.benchmark \
-  --config rag_pipeline/config.yaml \
-  --questions benchmarks/input/1238_question_map_phap_dien.json \
-  --id-map "benchmarks/input/Correct ID.json" \
-  --rechunk
-```
-
-This uses or creates precomputed embeddings in `artifacts/vector_store_bench/` — no indexing needed on repeated runs.
-
-Output includes:
-- Recall@1, Recall@3, Recall@10
-- Precision@1, Precision@3, Precision@10
-- MRR@10, nDCG@10, R-Precision, Normalized Precision@10
-- Reranker diagnostics (calls, API score gap, per-query categorization)
-- Per-question ranked results written to `benchmarks/results/`
-
-### 5. Search the index interactively
-
-```bash
+python -m rag_pipeline.cli.main -c rag_pipeline/config.yaml index
 python -m rag_pipeline.cli.main -c rag_pipeline/config.yaml search "thủ tục đấu giá tài sản"
 ```
 
----
+To enable LLM rewriting, set `query_rewriter.enabled: true` and `query_rewriter.mode: llm` in `rag_pipeline/config.yaml`. This sends query text to the configured API. Use `mode: rules` for local normalization or `search --raw` to bypass rewriting on a single query.
 
-## Project structure
+## Evaluate and tune
 
-```
-.
-├── README.md
-├── REPORT.md                             # Latest benchmark results
-├── data/                                 # Input JSON files (your data)
-│   ├── chu_de_1.json … chu_de_45.json
-├── rag_pipeline/
-│   ├── __init__.py
-│   ├── config.yaml                       # All tunable parameters
-│   │
-│   ├── cli/                              # CLI entry points
-│   │   ├── main.py                       #   index / search
-│   │   └── benchmark.py                  #   Full evaluation suite
-│   │
-│   ├── config/                           # Configuration
-│   │   ├── config.py                     #   Dataclasses + YAML loader (env var resolution)
-│   │   └── __init__.py
-│   │
-│   ├── data/                             # Data loading
-│   │   ├── data_loader.py                #   JSON parser + benchmark ID mapping
-│   │   └── __init__.py
-│   │
-│   ├── indexing/                         # Indexing pipeline
-│   │   ├── chunker.py                    #   Recursive semantic chunker + disk cache
-│   │   ├── context_generator.py          #   Heuristic or LLM article summarizer
-│   │   ├── embedder.py                   #   Local + API embedding backends
-│   │   ├── vector_store.py               #   ChromaDB persistent store
-│   │   └── __init__.py
-│   │
-│   ├── retrieval/                        # Retrieval pipeline
-│   │   ├── bm25_retriever.py            #   BM25 + pyvi Vietnamese word segmentation
-│   │   ├── query_rewriter.py            #   Vietnamese query normalization
-│   │   ├── reranker.py                  #   BGE API reranker (two modes)
-│   │   ├── retriever.py                 #   Hybrid: vector + BM25 + rerank
-│   │   └── __init__.py
-│   │
-│   ├── shared/                           # Shared types
-│   │   ├── pipeline_types.py            #   RetrievalResult dataclass
-│   │   └── __init__.py
-│   │
-│   └── requirements.txt                 # Python dependencies
-├── benchmarks/                            # Benchmark artifacts
-│   ├── input/                             #   Large input files (user-provided)
-│   └── results/                           #   Run logs, per-question JSON, diagnostics
-├── artifacts/
-│   ├── cache/                             #   Precomputed chunk cache
-│   ├── vector_store/                      #   ChromaDB persistent store (rebuild with index)
-│   └── vector_store_bench/                #   Benchmark store (auto-created)
-└── .gitignore
-```
-
----
-
-## Data input
-
-### VBQPPL parsed JSON (`data/chu_de_*.json`)
-
-Used by `data_loader.py`. Hierarchical structure: topic → section → chapter → article.
-
-```json
-[
-  {
-    "Chủ đề ID": "<uuid>",
-    "Tên chủ đề": "Bổ trợ tư pháp",
-    "Chương ID": "<uuid>",
-    "Tên chương": "Chương I NHỮNG QUY ĐỊNH CHUNG",
-    "Các điều": [
-      {
-        "Điều ID": "D45AE0D8-...",
-        "Tên điều": "Điều 4.1.LQ.1. Phạm vi điều chỉnh",
-        "Nội dung": "Luật này quy định về...",
-        "Ghi chú": { "metadata": [{ "Hiệu lực": "...", "Thi hành": "CÓ_HIỆU_LỰC_THI_HÀNH" }] },
-        "Chỉ dẫn": [{ "Điều liên quan": "Điều 28.3.LQ.82...", "ID Điều liên quan": "..." }]
-      }
-    ]
-  }
-]
-```
-
-### Benchmark ID mapping (`Correct ID.json`)
-
-A dict of `article_content → numeric_id` (±31,000 entries). During loading, each article's `Nội dung` is matched against this dict by exact content comparison. Matched articles get a `benchmark_id` stored in ChromaDB metadata — **never embedded**. This ID is only used to match retrieved chunks against `relevant_laws` during evaluation.
-
-### Adding new data
-
-Point the config at your directory, then run with `--rechunk`:
-
-```yaml
-data:
-  path: "../my_data"
-```
-
----
-
-## Full pipeline — phase by phase
-
-| Phase                           | File                     | What happens                                                                                                                                                       |
-| ------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **1. Structure parsing**  | `data_loader.py`       | JSON walker — flattens topic → section → chapter → article hierarchy. Extracts metadata, cross-references, and benchmark IDs via content matching.             |
-| **2. Recursive chunking** | `chunker.py`           | Recursive Clause → Point → Paragraph → Sentence splitting (max 1024 tokens). Merge short chunks, preserve sentence boundaries, overlap tokens prevent cuts.   |
-| **3. Context injection**  | `context_generator.py` | Article title + first sentence prepended to every chunk before embedding. LLM option available (`use_llm: true`).                                                  |
-| **4. Embedding**          | `embedder.py`          | Company `Vietnamese_Embedding` API (1024-dim) or local `sentence-transformers`. Batched 64/chunk, 3-retry exponential backoff.                                     |
-| **5. Vector store**       | `vector_store.py`      | ChromaDB — persistent, cosine-distance, HNSW-indexed.                                                                                                             |
-| **6. BM25 index**         | `bm25_retriever.py`    | Okapi BM25 with pyvi Vietnamese word segmentation (`k1=1.2`, `b=0.75`). Index persisted alongside ChromaDB.                                                    |
-| **7. Retrieval**          | `retriever.py`         | Hybrid: vector cosine + BM25 sparse → weighted fusion → optional reranker → top-10.                                                                            |
-| **8. Benchmarking**       | `benchmark.py`         | Full evaluation on 1,238 questions: Recall, Precision, MRR, nDCG, R-Precision, Normalized Precision, reranker diagnostics.                                       |
-
-### Retrieval (Phase 7 — per query)
-
-| Stage                     | What happens                                                                            |
-| ------------------------- | --------------------------------------------------------------------------------------- |
-| **Query rewriting** | Expands abbreviations, appends legal-domain context for short queries (disabled by default) |
-| **Vector search**   | Cosine similarity top-50 via ChromaDB                                                   |
-| **BM25 search**     | Okapi BM25 top-50 via rank-bm25                                                         |
-| **Score fusion**    | `(1 - fusion_weight) × vector + fusion_weight × BM25` (tuned at `0.05`)           |
-| **BGE reranker**    | Optional API call — two modes: `global_score_sort` or `reorder_window` (see below)    |
-| **Final top-k**     | Returns 10 highest-scoring chunks                                                       |
-
-### Reranker modes
-
-The reranker supports two modes via `reranker.bge.mode`:
-
-- **`global_score_sort`** (default if not set): all candidates are globally re-sorted by blended score (BGE API score + hybrid score). Powerful but can degrade top-3/top-10 if the reranker is inconsistent.
-- **`reorder_window`**: only the first `max_candidates` candidates are reranked and reordered among themselves. Candidates beyond the window retain their original positions. Safer — preserves top-10 recall at the cost of weaker top-1 improvement.
-
-### Benchmarking (Phase 8)
-
-For each question: retrieve top-10 chunks, check if any chunk's `benchmark_id` matches the question's `relevant_laws`. Reports hits / total at each cutoff plus ranking metrics.
-
-**Current best (no reranker):**
-
-| Metric | Value |
-|---|---|
-| Recall@1 | 0.7916 |
-| Recall@3 | 0.9249 |
-| Recall@10 | 0.9693 |
-| MRR@10 | 0.8607 |
-| nDCG@10 | 0.8436 |
-| Norm Precision@10 | 0.9142 |
-
-See `REPORT.md` for detailed comparative results across reranker configurations.
-
----
-
-## Configuration reference
-
-Key tunable parameters in `config.yaml`:
-
-### `reranker.bge`
-
-| Key | Default | Description |
-|---|---|---|
-| `mode` | `global_score_sort` | Reranking strategy: `global_score_sort` or `reorder_window` |
-| `enabled` | `true` | Enable API BGE reranking |
-| `max_candidates` | `3` | Candidates sent to the reranker per query |
-| `top_n` | `3` | Results returned by the API |
-| `blend_weight` | `1.0` | BGE score weight in blended sort (1.0 = pure BGE) |
-
-### `reranker.bge.conditional`
-
-Conditional reranking skips BGE when hybrid retrieval is already confident.
-
-| Key | Default | Description |
-|---|---|---|
-| `enabled` | `false` | Enable score-gap based conditional reranking |
-| `strategy` | `top1_top10_gap` | `top1_top2_gap` or `top1_top10_gap` |
-| `top1_top2_gap` | `0.03` | Call BGE when `score_1 - score_2 < threshold` |
-| `top1_top10_gap` | `0.08` | Alternative threshold for `strategy: top1_top10_gap` |
-| `min_candidates` | `2` | Minimum candidates required for conditional decision |
-
-### `bm25`
-
-| Key | Default | Description |
-|---|---|---|
-| `k1` | `1.2` | Term frequency saturation |
-| `b` | `0.75` | Document length normalization |
-| `fusion_weight` | `0.05` | BM25 weight in hybrid (0 = pure vector, 1 = pure BM25) |
-| `top_k` | `50` | Candidates from BM25 retrieval |
-
-### `retrieval`
-
-| Key | Default | Description |
-|---|---|---|
-| `candidate_pool_size` | `50` | Pool size before reranking |
-| `top_k` | `10` | Final results per query |
-| `enable_metadata_filtering` | `false` | Metadata post-filtering (status, topic) |
-
-Full reference: comments in `config.yaml`.
-
----
-
-## Reranker API
-
-The BGE reranker is called via:
-
-```text
-POST {api.base_url}/v1/rerank
-Authorization: Bearer {FPT_RERANKER_API_KEY}
-Content-Type: application/json
-```
-
-**Request:**
-
-```json
-{
-  "model": "bge-reranker-v2-m3",
-  "query": "question text",
-  "documents": ["chunk content 1", "chunk content 2"],
-  "top_n": 3
-}
-```
-
-**Response:**
-
-```json
-{
-  "results": [
-    {"index": 2, "relevance_score": 0.97},
-    {"index": 0, "relevance_score": 0.42}
-  ]
-}
-```
-
-Also supports `{"scores": [...]}`, `{"data": [{"index": ..., "score": ...}]}`.
-
----
-
-## Chunk output schema
-
-| Field | Type | Example |
-|---|---|---|
-| `chunk_id` | UUID | `017eb4cf-...` |
-| `article_id` | str | `D45AE0D8-...` |
-| `unit_type` | enum | `ARTICLE` / `CLAUSE` / `POINT` |
-| `content` | str | `"Điều: Nguyên tắc bầu cử.\n..."` |
-| `token_count` | int | `87` |
-| `hierarchy_path` | str | `article_id/clause_1/point_b` |
-| `document_id` | str | `85/2015/QH13` |
-| `status` | str | `CÓ_HIỆU_LỰC_THI_HÀNH` |
-| `topic_name` | str | `Tổ chức bộ máy nhà nước` |
-
----
-
-## Offline pipeline (from scratch)
+Supply the benchmark question JSON and the article-to-benchmark ID mapping. The example filenames below are local inputs. Use `--rechunk` when you change the corpus, mapping, or chunking settings.
 
 ```bash
-# Full re-index (rebuild chunks + embeddings + BM25)
-python -m rag_pipeline.cli.benchmark \
-  --config rag_pipeline/config.yaml \
-  --questions benchmarks/input/1238_question_map_phap_dien.json \
-  --id-map "benchmarks/input/Correct ID.json" \
-  --rechunk
+python -m rag_pipeline.cli.benchmark --config rag_pipeline/config.yaml --questions benchmarks/input/1238_question_map_phap_dien.json --id-map "benchmarks/input/Correct ID.json"
 ```
+
+Use a labeled tuning split for Optuna. The tuner scores weighted hybrid retrieval before reranking and selects by the fraction of queries with a relevant result in the top 10.
+
+```bash
+python -m rag_pipeline.cli.benchmark --config rag_pipeline/config.yaml --questions benchmarks/input/tuning_questions.json --id-map "benchmarks/input/Correct ID.json" --tune-bm25 --fine-trials 25
+```
+
+Copy the winning `bm25` parameters from `benchmarks/results/bm25_tuning.json` into the config and run the benchmark on held-out questions. Set `reranker.enabled: false` to evaluate the same ranking stage the tuner optimizes.
+
+## Repository layout
+
+| Path | Contents |
+| --- | --- |
+| `rag_pipeline/cli/` | Index, search, benchmark, and tuning entry points |
+| `rag_pipeline/indexing/` | Chunking, context injection, embeddings, and ChromaDB storage |
+| `rag_pipeline/retrieval/` | PyVi/BM25, query rewriting, fusion, and reranking |
+| `rag_pipeline/config.yaml` | Pipeline settings |
+| `data/phap_dien_dataset_45_chu_de/` | Public-source Pháp điển corpus grouped by topic |
+| `docs/` | Historical benchmark analysis in English and Vietnamese |
+| `artifacts/`, `benchmarks/results/` | Generated indexes, caches, and evaluation output |
+
+[License](LICENSE)
