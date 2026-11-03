@@ -1,5 +1,7 @@
 # Báo Cáo Tiến Độ Hệ Thống Truy Hồi Văn Bản Pháp Luật Tiếng Việt
 
+[English version](benchmark-report.en.md)
+
 Trọng tâm: Hybrid Search (Dense + BM25) + BGE Reranker
 
 ---
@@ -139,6 +141,8 @@ Các thư mục dữ liệu / artifact bên ngoài:
 ---
 
 ## 4. Dataset
+
+Dữ liệu văn bản pháp luật được lấy từ Bộ Pháp điển công khai của Việt Nam. [Cổng thông tin điện tử pháp điển của Bộ Tư pháp](https://phapdien.moj.gov.vn/Pages/chi-tiet-bo-phap-dien.aspx)
 
 | Thuộc tính | Giá trị |
 |---|---|

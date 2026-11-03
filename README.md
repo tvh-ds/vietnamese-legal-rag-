@@ -15,7 +15,7 @@ Replacing article-level chunks with recursive, structure-aware chunks and inject
 | Recall@10 | **98.6%** |
 | Precision@10 | **91.4%** |
 
-These results come from the internship evaluation across **8,238 benchmark queries**. The checkout includes a benchmark runner that takes a separate question set and relevance mapping. [Historical benchmark report](docs/benchmark-report.md)
+These results come from the internship evaluation across **8,238 benchmark queries**. The checkout includes a benchmark runner that takes a separate question set and relevance mapping. Historical benchmark report ([English](docs/benchmark-report.en.md) · [Tiếng Việt](docs/benchmark-report.md)).
 
 ## How retrieval works
 
@@ -54,7 +54,7 @@ The checked-in configuration uses FPT Cloud embeddings and BGE reranking. Set th
 | `FPT_API_KEY` | API embeddings and optional LLM rewriting |
 | `FPT_RERANKER_API_KEY` | BGE reranking when enabled |
 
-Build the index, then search the 45-topic corpus included under `data/`.
+The included 45-topic JSON corpus is sourced from Vietnam’s publicly available Pháp điển codification. Build the index from `data/phap_dien_dataset_45_chu_de/` before searching. [Ministry of Justice Pháp điển portal](https://phapdien.moj.gov.vn/Pages/chi-tiet-bo-phap-dien.aspx)
 
 ```bash
 python -m rag_pipeline.cli.main -c rag_pipeline/config.yaml index
@@ -87,8 +87,8 @@ Copy the winning `bm25` parameters from `benchmarks/results/bm25_tuning.json` in
 | `rag_pipeline/indexing/` | Chunking, context injection, embeddings, and ChromaDB storage |
 | `rag_pipeline/retrieval/` | PyVi/BM25, query rewriting, fusion, and reranking |
 | `rag_pipeline/config.yaml` | Pipeline settings |
-| `data/phap_dien_dataset_45_chu_de/` | Pháp điển source corpus grouped by topic |
-| `docs/` | Historical benchmark analysis |
+| `data/phap_dien_dataset_45_chu_de/` | Public-source Pháp điển corpus grouped by topic |
+| `docs/` | Historical benchmark analysis in English and Vietnamese |
 | `artifacts/`, `benchmarks/results/` | Generated indexes, caches, and evaluation output |
 
 [License](LICENSE)
