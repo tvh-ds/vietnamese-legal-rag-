@@ -4,9 +4,9 @@ A retrieval engine for Vietnamese legal question answering. It indexes the Vietn
 
 **FPT Smart Cloud · AI Engineer Intern · Hanoi, Vietnam · June–September 2026**
 
-## Internship results
+## Results
 
-Replacing article-level chunks with recursive, structure-aware chunks and injecting their parent context raised **Recall@10 from approximately 87% to 96.9%**. I then built a hybrid retriever and used a coarse-to-fine Optuna search to tune BM25 term saturation, document length normalization, and the dense/sparse fusion weight.
+Replacing article-level chunks with recursive, structure-aware chunks and injecting their parent context raised **Recall@10 from approximately 87% to 96.9%**. I then built a hybrid retriever and used a coarse-to-fine Optuna search to tune BM25 term saturation, document length normalization, and the dense/sparse fusion weight. Then I also leveraged PyVi and LLM-based query rerwrite to further push performance
 
 | Metric | Tuned hybrid retrieval |
 | --- | ---: |
