@@ -65,7 +65,9 @@ vector_store:
 query_rewriter:
   # Enable query normalization
   enabled: false
-  
+  mode: "rules"  # Use "llm" for model-based rewriting with rule-based fallback
+  model: "gemma-4-31B-it"
+
   # Expand Vietnamese legal abbreviations (dk → điều kiện, vbpl → văn bản pháp luật)
   expand_abbreviations: true
   

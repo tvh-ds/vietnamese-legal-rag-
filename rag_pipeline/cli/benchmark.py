@@ -32,7 +32,7 @@ from indexing.context_generator import LLMContextGenerator
 from indexing.embedder import create_embedder
 from indexing.vector_store import VectorStore
 from retrieval.bm25_retriever import BM25Retriever
-from retrieval.query_rewriter import QueryRewriter
+from retrieval.query_rewriter import create_query_rewriter
 from retrieval.reranker import Reranker
 from retrieval.retriever import Retriever
 
@@ -71,12 +71,6 @@ class Benchmark:
         # 3. Setup retriever
         embedder = create_embedder(self.config)
 
-        rewriter = QueryRewriter(
-            append_context=self.config.query_rewriter.append_context,
-            expand_abbreviations=self.config.query_rewriter.expand_abbreviations,
-            context_phrase=self.config.query_rewriter.context_phrase,
-        ) if self.config.query_rewriter.enabled else None
-
         reranker = None
         if self.config.reranker.enabled:
             reranker = Reranker(
@@ -96,32 +90,11 @@ class Benchmark:
                     conditional_min_candidates=self.config.reranker.bge.conditional.min_candidates,
                 )
 
-        retriever = Retriever(
-            embedder=embedder,
-            vector_store=store,
-            top_k=self.config.retrieval.top_k,
-            candidate_pool_size=self.config.retrieval.candidate_pool_size,
-            similarity_threshold=self.config.retrieval.similarity_threshold,
-            enable_metadata_filtering=self.config.retrieval.enable_metadata_filtering,
-            vector_weight=self.config.retrieval.vector_weight,
-            metadata_boost=self.config.retrieval.metadata_boost,
-            prefer_active=self.config.metadata.prefer_active,
-            topic_boost=self.config.metadata.topic_boost,
-            reranker=reranker,
-            bm25_retriever=bm25,
-            bm25_weight=self.config.bm25.fusion_weight,
-            fusion_method=self.config.bm25.fusion_method,
-            rrf_k=self.config.bm25.rrf_k,
-            rrf_vector_weight=self.config.bm25.rrf_vector_weight,
-            rrf_bm25_weight=self.config.bm25.rrf_bm25_weight,
-        )
+        retriever = self._retriever(embedder, store, bm25, reranker)
 
         # 4. Pre-embed all queries (one API batch — fast + retry-safe)
         print(f"\nEmbedding {len(questions)} queries…")
-        query_texts = [q["question"] for q in questions]
-        if rewriter is not None:
-            query_texts = [rewriter.rewrite(t) for t in query_texts]
-        query_embeddings = embedder.embed(query_texts, show_progress=True)
+        query_texts, query_embeddings = self._prepare_queries(questions, embedder)
 
         # 5. Evaluate
         print(f"\nEvaluating {len(questions)} questions (Recall + Precision @1 / @3 / @10)…")
@@ -559,11 +532,41 @@ class Benchmark:
                 "failed": reranker.calls_failed,
             }
 
-        log_path = "benchmarks/results/benchmark_runs.jsonl"
+        log_path = Path("benchmarks/results/benchmark_runs.jsonl")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(run_log, ensure_ascii=False) + "\n")
         print(f"Run summary appended to {log_path}")
         return result
+
+    def _prepare_queries(self, questions, embedder):
+        rewriter = create_query_rewriter(self.config)
+        query_texts = [q["question"] for q in questions]
+        if rewriter is not None:
+            query_texts = [rewriter.rewrite(t) for t in query_texts]
+        query_embeddings = embedder.embed(query_texts, show_progress=True)
+        return query_texts, query_embeddings
+
+    def _retriever(self, embedder, store, bm25, reranker=None) -> Retriever:
+        return Retriever(
+            embedder=embedder,
+            vector_store=store,
+            top_k=self.config.retrieval.top_k,
+            candidate_pool_size=self.config.retrieval.candidate_pool_size,
+            similarity_threshold=self.config.retrieval.similarity_threshold,
+            enable_metadata_filtering=self.config.retrieval.enable_metadata_filtering,
+            vector_weight=self.config.retrieval.vector_weight,
+            metadata_boost=self.config.retrieval.metadata_boost,
+            prefer_active=self.config.metadata.prefer_active,
+            topic_boost=self.config.metadata.topic_boost,
+            reranker=reranker,
+            bm25_retriever=bm25,
+            bm25_weight=self.config.bm25.fusion_weight,
+            fusion_method=self.config.bm25.fusion_method,
+            rrf_k=self.config.bm25.rrf_k,
+            rrf_vector_weight=self.config.bm25.rrf_vector_weight,
+            rrf_bm25_weight=self.config.bm25.rrf_bm25_weight,
+        )
 
     # -- indexing ------------------------------------------------------------
 
@@ -587,7 +590,7 @@ class Benchmark:
             bm25 = None
             if self.config.bm25.enabled:
                 bm25 = BM25Retriever.load(store_path + "/bm25_index.pkl")
-                if bm25 is not None and not bm25.has_benchmark_metadata():
+                if bm25 is None or not bm25.has_benchmark_metadata():
                     print("  [rebuild] BM25 index missing metadata — rebuilding from chunks cache…")
                     import pickle as _pickle
                     cache_path = Path("artifacts/cache/chunks_cache.pkl")
@@ -612,6 +615,7 @@ class Benchmark:
                     bm25.build_index(chunks)
                     bm25.save(store_path + "/bm25_index.pkl")
                     print(f"  [rebuild] BM25 index rebuilt ({len(chunks)} chunks)")
+                bm25.set_scoring(self.config.bm25.k1, self.config.bm25.b, self.config.bm25.top_k)
             return store, bm25, articles
 
         # 1. Load with benchmark IDs
@@ -763,7 +767,11 @@ def main() -> None:
     parser.add_argument("--id-map", required=True, help="Path to Correct ID.json")
     parser.add_argument("-n", "--max-questions", type=int, default=None)
     parser.add_argument("--rechunk", action="store_true", help="Force re-chunking (ignore cache)")
+    parser.add_argument("--tune-bm25", action="store_true", help="Run coarse-to-fine Optuna search")
+    parser.add_argument("--fine-trials", type=int, default=25, help="Number of fine tuning trials")
     args = parser.parse_args()
+    if args.tune_bm25 and args.fine_trials < 1:
+        parser.error("--fine-trials must be at least 1")
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 
@@ -785,6 +793,12 @@ def main() -> None:
         config.bm25.index_path = str(config_dir / config.bm25.index_path)
 
     benchmark = Benchmark(config)
+    if args.tune_bm25:
+        from cli.tuning import tune_bm25
+
+        tune_bm25(benchmark, args)
+        return
+
     result = benchmark.run(
         questions_path=args.questions,
         id_map_path=args.id_map,
